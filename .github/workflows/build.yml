@@ -154,7 +154,7 @@ jobs:
 
       - name: Collect APK
         id: locate_apk
-        if: always() && (steps.build_release.result == 'success' || steps.build_debug.result == 'success')
+        if: ${{ always() }}
         run: |
           echo "=== Collecting APK ==="
           # Flutter Gradle Plugin may output APK to android/app/build/outputs/flutter-apk/

@@ -143,7 +143,8 @@ jobs:
           flutter build apk --release \
             --obfuscate \
             --split-debug-info=build/debug-info \
-            --tree-shake-icons
+            --tree-shake-icons \
+            --android-skip-build-dependency-validation
         env:
           JAVA_HOME: /usr
 

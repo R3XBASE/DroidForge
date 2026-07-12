@@ -62,21 +62,21 @@ class _VncDesktopScreenState extends State<VncDesktopScreen> {
           ),
         ],
       ),
-      body: const Center(
+      body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.desktop_mac_rounded, size: 64, color: DroidTheme.textDim),
-            SizedBox(height: 16),
+            const Icon(Icons.desktop_mac_rounded, size: 64, color: DroidTheme.textDim),
+            const SizedBox(height: 16),
             Text('Linux Desktop', style: DroidTheme.headingLg),
-            SizedBox(height: 8),
+            const SizedBox(height: 8),
             Text(
               'The VNC client is opening in a separate activity.\n'
               'Use the back button to return to DroidForge.',
               style: DroidTheme.bodyMd,
               textAlign: TextAlign.center,
             ),
-            SizedBox(height: 24),
+            const SizedBox(height: 24),
             Text(
               'Press the Stop button to shutdown the desktop.',
               style: DroidTheme.bodySm,

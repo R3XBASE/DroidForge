@@ -73,7 +73,7 @@ class WelcomeScreen extends StatelessWidget {
 
                 // ── Feature Grid ──
                 _buildFeatureGrid()
-                    .animate(interval: 100.ms)
+                    .animate()
                     .fadeIn(delay: 800.ms, duration: 400.ms)
                     .slideX(begin: -0.1, duration: 400.ms),
 

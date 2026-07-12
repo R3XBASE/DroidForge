@@ -55,3 +55,4 @@ $RECYCLE.BIN/
 *.orig
 *.rej
 *.bak
+logs_*.zip

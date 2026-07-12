@@ -84,6 +84,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       should_release: ${{ steps.release_check.outputs.should_release }}
+      apk_found: ${{ steps.locate_apk.outputs.apk_found }}
 
     steps:
       - name: Checkout
@@ -139,52 +140,65 @@ jobs:
 
       - name: Build APK (Release)
         if: steps.build_mode.outputs.mode == 'release'
+        id: build_release
+        continue-on-error: true
         run: |
           flutter build apk --release \
             --android-skip-build-dependency-validation
 
       - name: Build APK (Debug)
         if: steps.build_mode.outputs.mode == 'debug'
+        continue-on-error: true
+        id: build_debug
         run: flutter build apk --debug
 
-      - name: Locate APK
+      - name: Collect APK
         id: locate_apk
-        if: steps.build_mode.outputs.mode == 'release'
+        if: always() && (steps.build_release.result == 'success' || steps.build_debug.result == 'success')
         run: |
-          # Flutter Gradle Plugin outputs to android/app/build/outputs/flutter-apk/
-          APK_DIR="android/app/build/outputs/flutter-apk"
-          if [ -d "$APK_DIR" ] && ls "$APK_DIR"/*.apk >/dev/null 2>&1; then
-            APK_PATH=$(find "$APK_DIR" -name "*.apk" | head -1)
-            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-            echo "✅ APK found: $APK_PATH"
+          echo "=== Collecting APK ==="
+          # Flutter Gradle Plugin may output APK to android/app/build/outputs/flutter-apk/
+          # Flutter expects it at build/app/outputs/flutter-apk/
+          # Try both locations and normalize to build/app/outputs/flutter-apk/
+          
+          FOUND=""
+          if [ -f "android/app/build/outputs/flutter-apk/app-release.apk" ]; then
+            FOUND="android/app/build/outputs/flutter-apk/app-release.apk"
+          elif [ -f "android/app/build/outputs/flutter-apk/app-debug.apk" ]; then
+            FOUND="android/app/build/outputs/flutter-apk/app-debug.apk"
+          elif [ -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
+            FOUND="build/app/outputs/flutter-apk/app-release.apk"
+          elif [ -f "build/app/outputs/flutter-apk/app-debug.apk" ]; then
+            FOUND="build/app/outputs/flutter-apk/app-debug.apk"
           else
-            # Fallback: search entire project
-            APK_PATH=$(find . -name "*.apk" -path "*/outputs/*" | head -1)
-            if [ -n "$APK_PATH" ]; then
-              echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-              echo "✅ APK found (fallback): $APK_PATH"
-            else
-              echo "❌ No APK found anywhere!"
-            fi
+            # Search entire project
+            FOUND=$(find . -name "*.apk" -path "*/outputs/*" -type f 2>/dev/null | head -1)
           fi
-
-      - name: Rename APK with version
-        if: steps.build_mode.outputs.mode == 'release'
-        run: |
-          APK_PATH="${{ steps.locate_apk.outputs.apk_path }}"
-          if [ -n "$APK_PATH" ]; then
+          
+          if [ -n "$FOUND" ]; then
+            echo "apk_found=true" >> $GITHUB_OUTPUT
             VERSION="${{ steps.version.outputs.version }}"
-            APK_DIR=$(dirname "$APK_PATH")
-            cp "$APK_PATH" "${APK_DIR}/DroidForge-v${VERSION}.apk"
-            echo "apk_path=${APK_DIR}/DroidForge-v${VERSION}.apk" >> $GITHUB_OUTPUT
-            echo "📱 APK renamed: DroidForge-v${VERSION}.apk"
+            MODE="${{ steps.build_mode.outputs.mode }}"
+            # Normalize to expected path
+            DEST_DIR="build/app/outputs/flutter-apk"
+            mkdir -p "$DEST_DIR"
+            cp "$FOUND" "${DEST_DIR}/DroidForge-v${VERSION}.apk"
+            echo "apk_path=${DEST_DIR}/DroidForge-v${VERSION}.apk" >> $GITHUB_OUTPUT
+            echo "✅ APK collected: $FOUND → ${DEST_DIR}/DroidForge-v${VERSION}.apk"
+          else
+            echo "apk_found=false" >> $GITHUB_OUTPUT
+            echo "❌ No APK found! Build may have truly failed."
+            echo "=== Directory listing ==="
+            find . -path "*/build/outputs" -type d 2>/dev/null
+            ls -la android/app/build/outputs/ 2>/dev/null || true
           fi
 
       - name: Upload APK Artifact
+        if: steps.locate_apk.outputs.apk_found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: DroidForge-APK-${{ steps.build_mode.outputs.mode }}
-          path: app/android/app/build/outputs/flutter-apk/*.apk
+          path: app/build/app/outputs/flutter-apk/DroidForge-*.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -193,7 +207,7 @@ jobs:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    if: needs.build.outputs.should_release == 'true'
+    if: needs.build.outputs.should_release == 'true' && needs.build.outputs.apk_found == 'true'
 
     permissions:
       contents: write
@@ -324,7 +338,7 @@ jobs:
           fi
 
       - name: Release Status
-        if: needs.build.outputs.should_release == 'true'
+        if: always()
         run: |
           if [ "${{ needs.release.result }}" == "success" ]; then
             echo "🎉 Auto-release completed!"

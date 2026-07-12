@@ -1,8 +1,6 @@
 package com.droidforge.core
 
-import android.app.Activity
 import android.content.Context
-import android.content.Intent
 import android.os.Build
 import android.os.Environment
 import android.os.StatFs

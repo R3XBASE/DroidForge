@@ -2,7 +2,6 @@ package com.droidforge.core
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import io.flutter.plugin.common.MethodChannel
 
 /**

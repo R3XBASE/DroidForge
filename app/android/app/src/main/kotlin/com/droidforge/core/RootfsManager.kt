@@ -8,7 +8,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.net.URL
-import java.util.zip.ZipInputStream
 
 /**
  * RootfsManager — downloads and extracts Linux rootfs for the proot container.

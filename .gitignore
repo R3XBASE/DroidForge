@@ -1,0 +1,57 @@
+# DroidForge
+
+# Android / Flutter
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.log
+*.tmp
+build/
+.gradle/
+local.properties
+*.jks
+*.keystore
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Flutter
+app/.dart_tool/
+app/.packages
+app/.pub/
+app/.pub-cache/
+app/build/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.metadata
+app/pubspec.lock
+
+# Android build
+app/android/app/build/
+app/android/.gradle/
+app/android/build/
+app/android/local.properties
+app/android/app/src/main/jniLibs/
+app/android/app/src/main/cpp/include/
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Misc
+*.orig
+*.rej
+*.bak

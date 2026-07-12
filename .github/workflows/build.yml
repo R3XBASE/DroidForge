@@ -1,0 +1,319 @@
+# ================================================================
+# DroidForge GitHub Actions Workflow
+# Builds Android APK and auto-releases on push to main
+# ================================================================
+
+name: Build & Release DroidForge APK
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'app/**'
+      - '.github/workflows/build.yml'
+      - 'scripts/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'app/**'
+  
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: 'Build mode'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      create_release:
+        description: 'Create GitHub Release?'
+        required: false
+        default: true
+        type: boolean
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.24.0'
+  JAVA_VERSION: '17'
+
+jobs:
+  # ── Job 1: Analyze & Test ──
+  analyze:
+    name: Analyze & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter Pub Get
+        run: flutter pub get
+
+      - name: Analyze Code
+        run: flutter analyze --no-pub
+        continue-on-error: true
+
+      - name: Run Tests
+        run: flutter test --no-pub
+        continue-on-error: true
+
+  # ── Job 2: Build APK ──
+  build:
+    name: Build APK
+    needs: analyze
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      should_release: ${{ steps.release_check.outputs.should_release }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter Pub Get
+        run: flutter pub get
+
+      - name: Get Version from pubspec
+        id: version
+        run: |
+          VERSION=$(grep 'version:' pubspec.yaml | head -1 | awk '{print $2}' | sed 's/+.*//')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 App version: $VERSION"
+
+      - name: Check if should release
+        id: release_check
+        run: |
+          # Auto-release on push to main, or manual trigger with create_release=true
+          if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ github.event_name }}" == "push" ]]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "✅ Will auto-release (push to main)"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.create_release }}" == "true" ]]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "✅ Will release (manual trigger)"
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "⏭️ Skipping release (PR or develop branch)"
+          fi
+
+      - name: Determine Build Mode
+        id: build_mode
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "mode=${{ github.event.inputs.build_mode }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ steps.release_check.outputs.should_release }}" == "true" ]]; then
+            echo "mode=release" >> $GITHUB_OUTPUT
+          else
+            echo "mode=release" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build APK (Release)
+        if: steps.build_mode.outputs.mode == 'release'
+        run: |
+          flutter build apk --release \
+            --obfuscate \
+            --split-debug-info=build/debug-info \
+            --tree-shake-icons
+        env:
+          JAVA_HOME: /usr
+
+      - name: Build APK (Debug)
+        if: steps.build_mode.outputs.mode == 'debug'
+        run: flutter build apk --debug
+
+      - name: Rename APK with version
+        if: steps.build_mode.outputs.mode == 'release'
+        run: |
+          APK_PATH=$(find build/app/outputs/flutter-apk -name "*.apk" | head -1)
+          if [ -n "$APK_PATH" ]; then
+            VERSION="${{ steps.version.outputs.version }}"
+            cp "$APK_PATH" "build/app/outputs/flutter-apk/DroidForge-v${VERSION}.apk"
+            echo "📱 APK renamed: DroidForge-v${VERSION}.apk"
+          fi
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DroidForge-APK-${{ steps.build_mode.outputs.mode }}
+          path: app/build/app/outputs/flutter-apk/*.apk
+          retention-days: 30
+
+  # ── Job 3: Auto-Release on push to main ──
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: needs.build.outputs.should_release == 'true'
+
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: DroidForge-APK-release
+          path: artifacts/
+
+      - name: Get version info
+        id: version
+        run: |
+          VERSION="${{ needs.build.outputs.version }}"
+          TAG="v${VERSION}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "📱 Version: $VERSION"
+          echo "🏷️ Tag: $TAG"
+
+      - name: Check if tag exists
+        id: tag_check
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️ Tag $TAG already exists, will update release"
+          else
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Tag $TAG is new"
+          fi
+
+      - name: Create Git Tag
+        if: steps.tag_check.outputs.tag_exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+          echo "🏷️ Tag ${{ steps.version.outputs.tag }} created"
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          # Get commits since last tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            CHANGES=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges 2>/dev/null || echo "- Initial release")
+          else
+            CHANGES=$(git log --pretty=format:"- %s (%h)" --no-merges -20 2>/dev/null || echo "- Initial release")
+          fi
+          
+          if [ -z "$CHANGES" ]; then
+            CHANGES="- No changes detected"
+          fi
+          
+          echo "changes<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create / Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "DroidForge ${{ steps.version.outputs.tag }}"
+          files: artifacts/*.apk
+          body: |
+            ## 🚀 DroidForge ${{ steps.version.outputs.tag }}
+            
+            ### 📦 What's New
+            ${{ steps.changelog.outputs.changes }}
+            
+            ### 📲 Installation
+            1. Download the APK below (`DroidForge-v${{ steps.version.outputs.version }}.apk`)
+            2. Enable **Install from Unknown Sources** on your device
+            3. Install and open DroidForge
+            
+            ### 📋 Requirements
+            - Android 9+ (API 28)
+            - ARM64 device
+            - 2GB+ RAM recommended
+            
+            ### 🔗 Links
+            - [📖 Documentation](https://github.com/${{ github.repository }}#readme)
+            - [🐛 Report Issues](${{ github.server_url }}/${{ github.repository }}/issues)
+            
+            ---
+            *Built automatically by GitHub Actions*
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
+
+      - name: Release Summary
+        run: |
+          echo "============================================"
+          echo "✅ RELEASE CREATED SUCCESSFULLY!"
+          echo "============================================"
+          echo ""
+          echo "🏷️  Tag:     ${{ steps.version.outputs.tag }}"
+          echo "📦 Version: ${{ needs.build.outputs.version }}"
+          echo "📥 APK:     DroidForge-v${{ needs.build.outputs.version }}.apk"
+          echo ""
+          echo "🔗 Release URL:"
+          echo "   ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
+          echo "============================================"
+
+  # ── Job 4: Notify ──
+  notify:
+    name: Notify
+    needs: [build, release]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Build Status
+        run: |
+          if [ "${{ needs.build.result }}" == "success" ]; then
+            echo "✅ DroidForge APK build successful!"
+          else
+            echo "❌ DroidForge APK build failed!"
+          fi
+
+      - name: Release Status
+        if: needs.build.outputs.should_release == 'true'
+        run: |
+          if [ "${{ needs.release.result }}" == "success" ]; then
+            echo "🎉 Auto-release completed!"
+            echo "📥 Download: ${{ github.server_url }}/${{ github.repository }}/releases"
+          elif [ "${{ needs.release.result }}" == "skipped" ]; then
+            echo "⏭️ Release skipped (PR or develop branch)"
+          else
+            echo "❌ Release failed!"
+          fi

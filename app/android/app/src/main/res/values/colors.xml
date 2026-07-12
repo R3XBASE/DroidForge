@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Primary Brand Colors -->
+    <color name="primary">#FF1E1E2E</color>
+    <color name="primary_variant">#FF2A2A3E</color>
+    <color name="on_primary">#FFCDD6F4</color>
+    
+    <color name="secondary">#FF89B4FA</color>
+    <color name="secondary_variant">#FF74C7EC</color>
+    <color name="on_secondary">#FF1E1E2E</color>
+    
+    <color name="surface">#FF181825</color>
+    <color name="surface_variant">#FF1E1E2E</color>
+    <color name="on_surface">#FFCDD6F4</color>
+    
+    <color name="background">#FF11111B</color>
+    <color name="on_background">#FFCDD6F4</color>
+    
+    <color name="error">#FFF38BA8</color>
+    <color name="on_error">#FF1E1E2E</color>
+    
+    <!-- Accent Colors -->
+    <color name="accent_green">#FFA6E3A1</color>
+    <color name="accent_yellow">#FFF9E2AF</color>
+    <color name="accent_peach">#FFFCBA93</color>
+    <color name="accent_mauve">#FFCBA6F7</color>
+    <color name="accent_red">#FFF38BA8</color>
+    <color name="accent_maroon">#FFB4BEFE</color>
+    <color name="accent_flamingo">#FFF2CDCD</color>
+    <color name="accent_pink">#FFF5C2E7</color>
+    <color name="accent_sapphire">#FF74C7EC</color>
+    
+    <!-- Status Bar -->
+    <color name="status_bar">#FF11111B</color>
+    
+    <!-- Navigation Bar -->
+    <color name="nav_bar">#FF11111B</color>
+    
+    <!-- Splash Screen -->
+    <color name="splash_bg">#FF11111B</color>
+    <color name="splash_fg">#FF89B4FA</color>
+</resources>

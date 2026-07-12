@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Background circle -->
+    <path
+        android:fillColor="#FF89B4FA"
+        android:pathData="M24,24m-20,0a20,20 0,1 1,40 0a20,20 0,1 1,-40 0"/>
+    <!-- Hammer head -->
+    <path
+        android:fillColor="#FF1E1E2E"
+        android:pathData="M18,16h12v2h-12z"/>
+    <!-- Hammer handle -->
+    <path
+        android:fillColor="#FF1E1E2E"
+        android:pathData="M22,18v10h2v-10z"/>
+    <!-- Spark -->
+    <path
+        android:fillColor="#FFA6E3A1"
+        android:pathData="M17,15h12v2h-12z"/>
+</vector>

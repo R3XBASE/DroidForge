@@ -1,0 +1,63 @@
+name: droidforge
+description: "DroidForge - Advanced Linux Desktop for Android. Run XFCE4/LXQt/MATE/KDE with GPU acceleration, multi-distro support, and auto-patching."
+publish_to: 'none'
+version: 2.0.0+1
+
+environment:
+  sdk: ^3.10.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # State Management
+  provider: ^6.1.2
+  
+  # Storage
+  shared_preferences: ^2.3.4
+  
+  # UI
+  google_fonts: ^6.2.1
+  flutter_animate: ^4.5.2
+  percent_indicator: ^4.2.3
+  flutter_staggered_animations: ^1.1.1
+  shimmer: ^3.0.0
+  
+  # Native Bridge
+  flutter_rfb:
+    path: packages/flutter_rfb
+  
+  # Utilities
+  url_launcher: ^6.3.2
+  path_provider: ^2.1.4
+  intl: ^0.19.0
+  
+  # Icons
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: false
+  image_path: "assets/icons/logo.png"
+  remove_alpha_ios: true
+  adaptive_icon_background: "#0A0E17"
+  adaptive_icon_foreground: "assets/icons/logo.png"
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/icons/logo.png
+
+  fonts:
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Regular.ttf
+        - asset: assets/fonts/JetBrainsMono-Bold.ttf
+          weight: 700

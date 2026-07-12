@@ -20,7 +20,7 @@ object DeviceInfoHelper {
             "device" to Build.DEVICE,
             "androidVersion" to Build.VERSION.RELEASE,
             "sdkVersion" to Build.VERSION.SDK_INT,
-            "abi" to Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
+            "abi" to (Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown") as String,
             "gpuVendor" to detectGPUVendor(),
             "totalMemory" to getTotalMemory(context),
             "availableMemory" to getAvailableMemory(context),
@@ -66,7 +66,7 @@ object DeviceInfoHelper {
     }
 
     private fun getTotalStorage(): Long {
-        val stat = StatFs("/data".path)
+        val stat = StatFs("/data")
         return stat.blockCountLong * stat.blockSizeLong
     }
 

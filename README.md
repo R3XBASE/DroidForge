@@ -13,8 +13,9 @@
 <p align="center">
   <a href="#features">Features</a> · 
   <a href="#quick-start">Quick Start</a> · 
-  <a href="#app">Standalone App</a> · 
+  <a href="#standalone-app">Standalone App</a> · 
   <a href="#commands">Commands</a> · 
+  <a href="#development">Development</a> ·
   <a href="#contributing">Contributing</a>
 </p>
 
@@ -30,28 +31,6 @@ Connect your phone to a monitor and it becomes a Linux PC. Unplug it and your en
 
 ## Features
 
-### vs DroidDesk (What's Improved)
-
-| Feature | DroidDesk | DroidForge |
-|---------|-----------|------------|
-| Desktop Environments | 1 (hardcoded XFCE4) | 4 (XFCE4/LXQt/MATE/KDE) |
-| Linux Distros | 1 (hardcoded Ubuntu) | 5 (Ubuntu/Debian/Kali/Arch/Alpine) |
-| DE Selection | None (hardcoded) | Interactive picker with RAM-aware recommendations |
-| Distro Selection | None (hardcoded) | Interactive picker with descriptions |
-| Error Recovery | None | Automatic rollback + recovery mode |
-| Logging | Basic | Comprehensive log system |
-| GPU Detection | Basic Adreno check | Adreno/Mali/PowerVR detection |
-| Auto-patcher | Basic | Enhanced Electron app patching |
-| Menu Sync | v3 | v5 with better app detection |
-| App UI | Basic | Premium Material 3 dark UI |
-| GitHub Actions | None | Full CI/CD pipeline |
-| Setup Script | Monolithic | Modular with error trapping |
-| Status Script | None | Full system status checker |
-| VNC Config | Basic | Configurable resolution picker |
-| Settings | Basic | Full settings screen |
-
-### Core Features
-
 - **5 Linux Distros**: Ubuntu 24.04, Debian 12, Kali Linux, Arch Linux, Alpine Linux
 - **4 Desktop Environments**: XFCE4, LXQt, MATE, KDE Plasma
 - **GPU Acceleration**: Turnip (Adreno), Panfrost (Mali), Zink (fallback)
@@ -62,6 +41,8 @@ Connect your phone to a monitor and it becomes a Linux PC. Unplug it and your en
 - **VNC Support**: Connect from any device
 - **Recovery Mode**: Automatic rollback on failures
 - **Comprehensive Logging**: Full setup logs for debugging
+- **Flutter App**: Beautiful Material 3 dark UI with animated setup wizard
+- **Auto-Release CI/CD**: Build + release APK automatically via GitHub Actions
 
 ## Quick Start
 
@@ -76,7 +57,7 @@ Connect your phone to a monitor and it becomes a Linux PC. Unplug it and your en
 
 ```bash
 # One-liner setup
-curl -sL https://raw.githubusercontent.com/YOUR_USERNAME/DroidForge/main/termux-linux-setup.sh -o setup.sh
+curl -sL https://raw.githubusercontent.com/R3XBASE/DroidForge/main/termux-linux-setup.sh -o setup.sh
 bash setup.sh
 ```
 
@@ -93,7 +74,7 @@ bash ~/start-x11.sh
 
 ### Option 2: Standalone App
 
-Download the latest APK from the [Releases](../../releases) tab. The app handles everything automatically:
+Download the latest APK from the [Releases](https://github.com/R3XBASE/DroidForge/releases) tab. The app handles everything automatically:
 
 1. Install the APK
 2. Open DroidForge
@@ -118,7 +99,7 @@ For phones without USB-C display output:
 
 ```bash
 # On your Raspberry Pi
-curl -sL https://raw.githubusercontent.com/YOUR_USERNAME/DroidForge/main/scripts/pi-display-bridge.sh -o ~/pi-bridge.sh
+curl -sL https://raw.githubusercontent.com/R3XBASE/DroidForge/main/scripts/pi-display-bridge.sh -o ~/pi-bridge.sh
 chmod +x ~/pi-bridge.sh
 bash ~/pi-bridge.sh
 ```
@@ -131,7 +112,7 @@ See [scripts/pi-display-bridge.sh](scripts/pi-display-bridge.sh) for full instru
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/DroidForge.git
+git clone https://github.com/R3XBASE/DroidForge.git
 cd DroidForge/app
 
 # Install dependencies
@@ -144,48 +125,79 @@ flutter run
 flutter build apk --release
 ```
 
-### GitHub Actions
+### GitHub Actions (Auto-Release)
 
-The project includes a full CI/CD pipeline:
+The project includes a full CI/CD pipeline that auto-releases APK on every push to `main`:
 
-- **On push to main**: Analyze + Build APK
-- **On PR**: Analyze + Build (debug)
-- **On release tag**: Build + Upload to GitHub Release
+```
+Push to main → Build APK → Auto-Release to GitHub
+```
+
+| Trigger | What Happens |
+|---------|-------------|
+| Push to `main` | Build + Auto-Release APK |
+| Push to `develop` | Build only |
+| Pull Request | Build only |
+| Manual trigger | Build + optional release |
+
+To trigger a release manually:
+1. Go to GitHub → Actions → "Build & Release DroidForge APK"
+2. Click "Run workflow"
+3. Select build mode + toggle "Create Release"
+4. Click "Run workflow"
 
 ### Project Structure
 
 ```
 DroidForge/
 ├── .github/workflows/
-│   └── build.yml          # CI/CD pipeline
-├── app/                    # Flutter application
-│   ├── android/           # Android native code
+│   └── build.yml              # CI/CD pipeline (auto-release)
+├── app/                        # Flutter application
+│   ├── android/
+│   │   ├── app/src/main/
+│   │   │   ├── AndroidManifest.xml
+│   │   │   └── kotlin/com/droidforge/core/
+│   │   │       ├── MainActivity.kt       # Flutter ↔ Kotlin bridge
+│   │   │       ├── ProotManager.kt       # PRoot lifecycle
+│   │   │       ├── RootfsManager.kt      # Rootfs download/extract
+│   │   │       ├── VncManager.kt         # VNC/X11 session
+│   │   │       ├── TerminalManager.kt    # In-app terminal
+│   │   │       └── DeviceInfoHelper.kt   # Device detection
+│   │   └── build.gradle.kts
 │   ├── lib/
-│   │   ├── main.dart      # App entry point
-│   │   ├── screens/       # UI screens
-│   │   ├── state/         # State management
-│   │   ├── services/      # Platform bridge
-│   │   └── theme/         # Design system
+│   │   ├── main.dart
+│   │   ├── config/constants.dart
+│   │   ├── screens/
+│   │   │   ├── welcome_screen.dart
+│   │   │   ├── home_screen.dart
+│   │   │   ├── terminal_screen.dart
+│   │   │   ├── vnc_desktop_screen.dart
+│   │   │   ├── settings_screen.dart
+│   │   │   └── setup/
+│   │   │       ├── distro_picker.dart
+│   │   │       ├── de_picker.dart
+│   │   │       ├── install_screen.dart
+│   │   │       └── de_install_screen.dart
+│   │   ├── services/platform_bridge.dart
+│   │   ├── state/app_state.dart
+│   │   └── theme/droid_theme.dart
 │   └── pubspec.yaml
 ├── scripts/
 │   ├── pi-display-bridge.sh
 │   └── proot-menu-sync.sh
-├── termux-linux-setup.sh   # Main setup script
-├── fetch_deps.sh           # Native dependency fetcher
+├── termux-linux-setup.sh
+├── fetch_deps.sh
+├── .gitignore
 └── README.md
 ```
 
 ## Contributing
 
-1. Fork the repository
+1. Fork the repository from [github.com/R3XBASE/DroidForge](https://github.com/R3XBASE/DroidForge)
 2. Create a feature branch
 3. Make your changes
 4. Run `flutter analyze` and `flutter test`
 5. Submit a pull request
-
-## Acknowledgments
-
-Built on top of the work by [orailnoor](https://github.com/orailnoor/DroidDesk) — the original DroidDesk project.
 
 ## License
 

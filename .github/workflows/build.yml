@@ -141,29 +141,42 @@ jobs:
         if: steps.build_mode.outputs.mode == 'release'
         run: |
           flutter build apk --release \
-            --android-skip-build-dependency-validation 2>&1 || true
-          echo "=== APK SEARCH ==="
-          find . -name "*.apk" -type f 2>/dev/null
-          echo "=== BUILD TREE ==="
-          find build/app/outputs -type f 2>/dev/null || echo "NO build/app/outputs"
-          echo "=== ANDROID BUILD TREE ==="  
-          find android/app/build/outputs -type f 2>/dev/null || echo "NO android/app/build/outputs"
-          echo "=== CHECK ROOT BUILD ==="
-          ls -la build/app/outputs/flutter-apk/ 2>/dev/null || echo "NO flutter-apk dir"
-          echo "=== CHECK ANDROID BUILD ==="
-          ls -la android/app/build/outputs/apk/ 2>/dev/null || echo "NO apk output"
+            --android-skip-build-dependency-validation
 
       - name: Build APK (Debug)
         if: steps.build_mode.outputs.mode == 'debug'
         run: flutter build apk --debug
 
+      - name: Locate APK
+        id: locate_apk
+        if: steps.build_mode.outputs.mode == 'release'
+        run: |
+          # Flutter Gradle Plugin outputs to android/app/build/outputs/flutter-apk/
+          APK_DIR="android/app/build/outputs/flutter-apk"
+          if [ -d "$APK_DIR" ] && ls "$APK_DIR"/*.apk >/dev/null 2>&1; then
+            APK_PATH=$(find "$APK_DIR" -name "*.apk" | head -1)
+            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+            echo "✅ APK found: $APK_PATH"
+          else
+            # Fallback: search entire project
+            APK_PATH=$(find . -name "*.apk" -path "*/outputs/*" | head -1)
+            if [ -n "$APK_PATH" ]; then
+              echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+              echo "✅ APK found (fallback): $APK_PATH"
+            else
+              echo "❌ No APK found anywhere!"
+            fi
+          fi
+
       - name: Rename APK with version
         if: steps.build_mode.outputs.mode == 'release'
         run: |
-          APK_PATH=$(find build/app/outputs/flutter-apk -name "*.apk" | head -1)
+          APK_PATH="${{ steps.locate_apk.outputs.apk_path }}"
           if [ -n "$APK_PATH" ]; then
             VERSION="${{ steps.version.outputs.version }}"
-            cp "$APK_PATH" "build/app/outputs/flutter-apk/DroidForge-v${VERSION}.apk"
+            APK_DIR=$(dirname "$APK_PATH")
+            cp "$APK_PATH" "${APK_DIR}/DroidForge-v${VERSION}.apk"
+            echo "apk_path=${APK_DIR}/DroidForge-v${VERSION}.apk" >> $GITHUB_OUTPUT
             echo "📱 APK renamed: DroidForge-v${VERSION}.apk"
           fi
 
@@ -171,7 +184,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: DroidForge-APK-${{ steps.build_mode.outputs.mode }}
-          path: app/build/app/outputs/flutter-apk/*.apk
+          path: app/android/app/build/outputs/flutter-apk/*.apk
+          if-no-files-found: error
           retention-days: 30
 
   # ── Job 3: Auto-Release on push to main ──

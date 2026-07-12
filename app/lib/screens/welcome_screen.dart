@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:droidforge/theme/droid_theme.dart';
-import 'package:droidforge/state/app_state.dart';
 import 'package:droidforge/screens/setup/distro_picker.dart';
 
 /// Welcome screen — first thing the user sees.

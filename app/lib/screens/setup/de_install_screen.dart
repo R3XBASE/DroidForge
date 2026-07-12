@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:droidforge/theme/droid_theme.dart';
 import 'package:droidforge/state/app_state.dart';
-import 'package:droidforge/screens/vnc_desktop_screen.dart';
 
 /// DE Install screen — handles installing desktop environment packages.
 class DEInstallScreen extends StatelessWidget {

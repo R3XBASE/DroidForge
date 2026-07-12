@@ -59,7 +59,7 @@ class SettingsScreen extends StatelessWidget {
                       trailing: Switch(
                         value: state.autoSyncMenu,
                         onChanged: (v) => state.setAutoSyncMenu(v),
-                        activeColor: DroidTheme.primary,
+                        activeThumbColor: DroidTheme.primary,
                       ),
                     ),
 
@@ -71,7 +71,7 @@ class SettingsScreen extends StatelessWidget {
                       trailing: Switch(
                         value: state.autoStartAudio,
                         onChanged: (v) => state.setAutoStartAudio(v),
-                        activeColor: DroidTheme.primary,
+                        activeThumbColor: DroidTheme.primary,
                       ),
                     ),
 

@@ -7,7 +7,6 @@ import 'package:droidforge/screens/vnc_desktop_screen.dart';
 import 'package:droidforge/screens/setup/de_install_screen.dart';
 import 'package:droidforge/screens/settings_screen.dart';
 import 'package:droidforge/screens/terminal_screen.dart';
-import 'package:droidforge/services/platform_bridge.dart';
 
 /// Home dashboard — central hub after setup is complete.
 class HomeScreen extends StatelessWidget {

@@ -141,20 +141,17 @@ jobs:
         if: steps.build_mode.outputs.mode == 'release'
         run: |
           flutter build apk --release \
-            --android-skip-build-dependency-validation 2>&1
-
-      - name: Debug APK output location
-        if: steps.build_mode.outputs.mode == 'release'
-        continue-on-error: true
-        run: |
-          echo "=== Looking for APK files ==="
-          find build -name "*.apk" 2>/dev/null || echo "No APK in build/"
-          echo "=== Looking in app/build ==="
-          find app/build -name "*.apk" 2>/dev/null || echo "No APK in app/build/"
-          echo "=== build/app/outputs tree ==="
-          find build/app/outputs -type f 2>/dev/null || echo "No outputs dir"
-          echo "=== app/build/outputs tree ==="
-          find app/build/app/outputs -type f 2>/dev/null || echo "No app/build/app/outputs dir"
+            --android-skip-build-dependency-validation 2>&1 || true
+          echo "=== APK SEARCH ==="
+          find . -name "*.apk" -type f 2>/dev/null
+          echo "=== BUILD TREE ==="
+          find build/app/outputs -type f 2>/dev/null || echo "NO build/app/outputs"
+          echo "=== ANDROID BUILD TREE ==="  
+          find android/app/build/outputs -type f 2>/dev/null || echo "NO android/app/build/outputs"
+          echo "=== CHECK ROOT BUILD ==="
+          ls -la build/app/outputs/flutter-apk/ 2>/dev/null || echo "NO flutter-apk dir"
+          echo "=== CHECK ANDROID BUILD ==="
+          ls -la android/app/build/outputs/apk/ 2>/dev/null || echo "NO apk output"
 
       - name: Build APK (Debug)
         if: steps.build_mode.outputs.mode == 'debug'

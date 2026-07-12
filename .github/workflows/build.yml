@@ -141,9 +141,6 @@ jobs:
         if: steps.build_mode.outputs.mode == 'release'
         run: |
           flutter build apk --release \
-            --obfuscate \
-            --split-debug-info=build/debug-info \
-            --tree-shake-icons \
             --android-skip-build-dependency-validation
         env:
           JAVA_HOME: /usr

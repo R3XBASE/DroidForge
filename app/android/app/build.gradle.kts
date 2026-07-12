@@ -36,15 +36,6 @@ android {
         release {
             // Use debug signing for now — switch to release keystore for production
             signingConfig = signingConfigs.getByName("debug")
-            
-            // Enable minification and obfuscation
-            isMinifyEnabled = true
-            isShrinkResources = true
-            
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
         }
         
         debug {

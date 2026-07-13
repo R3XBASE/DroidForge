@@ -24,13 +24,14 @@ import java.net.URL
  */
 class RootfsManager(private val context: Context) {
 
-    // Distro rootfs download URLs — prefer .tar.gz for Android compatibility
+    // Distro rootfs download URLs — all verified working as of July 2026
+    // .tar.gz preferred for Android compatibility (no xz decompression needed)
     private val distroUrls = mapOf(
-        "ubuntu" to "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.2-base-arm64.tar.gz",
-        "debian" to "https://cdimage.debian.org/cdimage/cloud/bookworm/daily/latest/debian-12-genericarm64-daily.root.tar.xz",
-        "kali-nethunter" to "https://images.kali.org/kali-2024.2-kali-rootfs-arm64.tar.xz",
-        "archlinux" to "https://gitlab.archlinux.org/archlinux/archlinux-docker/-/packages/20849842/raw/latest/file/RootFs-x86_64.tar.xz",
-        "alpine" to "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-rootfs-3.20.1-aarch64.tar.gz"
+        "ubuntu" to "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.4-base-arm64.tar.gz",
+        "debian" to "https://cdimage.debian.org/cdimage/cloud/bookworm/daily/latest/debian-12-genericcloud-arm64-daily.tar.xz",
+        "kali-nethunter" to "https://kali.download/cloud-images/kali-2026.2/kali-linux-2026.2-cloud-genericcloud-arm64.tar.xz",
+        "archlinux" to "https://geo.mirror.pkgbuild.com/iso/latest/archlinux-bootstrap-x86_64.tar.zst",
+        "alpine" to "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.7-aarch64.tar.gz"
     )
 
     private val prootDir: File = File(context.filesDir, "proot")
@@ -61,12 +62,15 @@ class RootfsManager(private val context: Context) {
                 }
 
                 downloadDir.mkdirs()
-                val filename = "rootfs_${distro}.tar.gz"
+                // Determine filename from URL
+                val urlFilename = url.substringAfterLast("/").substringBefore("?")
+                val filename = "rootfs_${distro}_${urlFilename}"
                 val outputFile = File(downloadDir, filename)
 
-                // Also check for old .xz cache and delete it (we switched to .tar.gz)
-                val oldXz = File(downloadDir, "rootfs_${distro}.tar.xz")
-                if (oldXz.exists()) oldXz.delete()
+                // Clean old cache files for this distro
+                downloadDir.listFiles()
+                    ?.filter { it.name.startsWith("rootfs_${distro}") && it.name != filename }
+                    ?.forEach { it.delete() }
 
                 // Skip download if already cached
                 if (outputFile.exists() && outputFile.length() > 1000) {
@@ -152,6 +156,10 @@ class RootfsManager(private val context: Context) {
 
                 // Extract using tar based on file type
                 val command = when {
+                    archiveFile.name.endsWith(".tar.zst") -> {
+                        // zstd decompression — may not be available on all Android devices
+                        "zstd -d '${archiveFile.absolutePath}' --stdout | tar -xf - -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
+                    }
                     archiveFile.name.endsWith(".tar.xz") -> {
                         "tar -xJf '${archiveFile.absolutePath}' -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
                     }
@@ -196,8 +204,15 @@ class RootfsManager(private val context: Context) {
 
                 // Check if extraction actually worked
                 if (exitCode != 0 || output.contains("EXIT_CODE=1") || output.contains("EXIT_CODE=2")) {
+                    val hint = when {
+                        archiveFile.name.endsWith(".tar.xz") && output.contains("xz") ->
+                            "Your device may not support xz decompression. Try Ubuntu or Alpine (tar.gz format)."
+                        archiveFile.name.endsWith(".tar.zst") && output.contains("zstd") ->
+                            "Your device may not support zstd decompression. Try Ubuntu or Alpine (tar.gz format)."
+                        else -> ""
+                    }
                     sendProgress(channel, "onExtractProgress", -1.0,
-                        "tar extraction failed (exit $exitCode). Output:\n${output.takeLast(500)}")
+                        "tar extraction failed (exit $exitCode). $hint\nOutput:\n${output.takeLast(500)}")
                     return@Thread
                 }
 
@@ -236,14 +251,17 @@ class RootfsManager(private val context: Context) {
         }.start()
     }
 
-    /** Find the archive file — prefer .tar.gz over .tar.xz */
+    /** Find the archive file for a distro */
     private fun findArchive(distro: String): File? {
-        val gzFile = File(downloadDir, "rootfs_${distro}.tar.gz")
-        if (gzFile.exists() && gzFile.length() > 1000) return gzFile
-
-        val xzFile = File(downloadDir, "rootfs_${distro}.tar.xz")
-        if (xzFile.exists() && xzFile.length() > 1000) return xzFile
-
+        // Try multiple naming patterns
+        val extensions = listOf(".tar.gz", ".tgz", ".tar.xz", ".tar.zst")
+        for (ext in extensions) {
+            // Try exact naming from download
+            val matches = downloadDir.listFiles()
+                ?.filter { it.name.startsWith("rootfs_${distro}") && it.name.endsWith(ext) && it.length() > 1000 }
+                ?.sortedByDescending { it.lastModified() }
+            if (!matches.isNullOrEmpty()) return matches.first()
+        }
         // Fall back to any rootfs_ file for this distro
         return downloadDir.listFiles()
             ?.filter { it.name.startsWith("rootfs_${distro}") && it.length() > 1000 }

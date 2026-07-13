@@ -1,8 +1,14 @@
 package com.droidforge.core
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -69,7 +75,6 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "extractRootfs" -> {
-                    // Use current selected distro from state
                     val distro = call.argument<String>("distro") ?: "ubuntu"
                     rootfsManager.extractRootfs(distro, messenger)
                     result.success(null)
@@ -114,10 +119,11 @@ class MainActivity : FlutterActivity() {
 
                 // ── Battery ──
                 "requestBatteryOptimization" -> {
-                    result.success(null)
+                    openBatterySettings()
+                    result.success(true)
                 }
                 "isBatteryOptimized" -> {
-                    result.success(false)
+                    result.success(isBatteryIgnoringOptimizations())
                 }
 
                 // ── Backup/Restore ──
@@ -134,6 +140,62 @@ class MainActivity : FlutterActivity() {
 
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    /**
+     * Open battery optimization settings for this app.
+     * On Android 6+, tries to request ignoring battery optimization,
+     * falls back to the battery optimization settings page.
+     */
+    private fun openBatterySettings() {
+        try {
+            // Method 1: Request to ignore battery optimizations directly (shows system dialog)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.data = Uri.parse("package:$packageName")
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+                return
+            }
+        } catch (_: Exception) {}
+
+        try {
+            // Method 2: Open battery optimization settings for this app
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(intent)
+                return
+            }
+        } catch (_: Exception) {}
+
+        try {
+            // Method 3: Open general battery settings
+            val intent = Intent()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                intent.action = Settings.ACTION_BATTERY_SAVER_SETTINGS
+            } else {
+                intent.action = Settings.ACTION_INTERNAL_STORAGE_SETTINGS
+            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * Check if this app is ignoring battery optimizations.
+     */
+    private fun isBatteryIgnoringOptimizations(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                pm.isIgnoringBatteryOptimizations(packageName)
+            } else {
+                true // Below Android 6, no battery optimization
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 

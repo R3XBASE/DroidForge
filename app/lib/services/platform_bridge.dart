@@ -125,8 +125,9 @@ class DroidDeskPlatform {
 
   // ── Battery Optimization ──
 
-  static Future<void> requestBatteryOptimization() async {
-    await _channel.invokeMethod('requestBatteryOptimization');
+  static Future<bool> requestBatteryOptimization() async {
+    final result = await _channel.invokeMethod('requestBatteryOptimization');
+    return result as bool? ?? false;
   }
 
   static Future<bool> isBatteryOptimized() async {

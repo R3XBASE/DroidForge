@@ -1,12 +1,12 @@
 package com.droidforge.core
 
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import java.io.BufferedReader
-import java.io.DataOutputStream
 import java.io.File
 import java.io.InputStreamReader
 
@@ -14,7 +14,7 @@ import java.io.InputStreamReader
  * ProotManager — handles proot container lifecycle.
  *
  * - Bootstrap proot environment
- * - Install desktop environments
+ * - Install desktop environments (via apt INSIDE proot container)
  * - Start/stop Linux sessions
  * - Backup/restore containers
  */
@@ -39,15 +39,47 @@ class ProotManager(private val context: Context) {
         // Check common proot locations
         val localProot = File(context.filesDir, "proot/proot-arm64")
         if (localProot.exists()) return localProot.absolutePath
-        return "proot" // hope it's on PATH
+        return "proot"
+    }
+
+    /** Get the installed rootfs directory for the current distro */
+    private fun getRootfsDir(distro: String? = null): File {
+        val d = distro ?: detectInstalledDistro().ifEmpty { "ubuntu" }
+        return File(prootDir, d)
+    }
+
+    /**
+     * Build a proot command prefix that runs inside the container.
+     * This is used for apt install, configuration, etc.
+     */
+    private fun buildProotExecPrefix(distro: String? = null): String {
+        val rootfsDir = getRootfsDir(distro)
+        val prootRoot = rootfsDir.absolutePath
+        val proot = prootBinary()
+
+        return buildString {
+            append(proot)
+            append(" -0")
+            append(" -w /root")
+            append(" --link2symlink")
+            append(" -b /dev")
+            append(" -b /proc")
+            append(" -b /sys")
+            append(" -b /dev/urandom:/dev/random")
+            append(" -b $prootRoot")
+            append(" -b /data/data/com.termux/files/home:/home")
+            append(" -r $prootRoot")
+            append(" --kill-on-exit")
+            append(" --")
+        }
     }
 
     /** Check if the proot environment is bootstrapped */
     fun isBootstrapped(): Boolean {
-        // Check if any distro rootfs dir has files
         if (prootDir.exists()) {
             prootDir.listFiles()?.forEach { dir ->
-                if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true) {
+                if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
+                    && dir.name != "backups") {
                     return true
                 }
             }
@@ -66,8 +98,8 @@ class ProotManager(private val context: Context) {
     }
 
     /**
-     * Set up the bootstrap environment — ensure proot and base tools exist.
-     * Calls [onProgress] during setup.
+     * Set up the bootstrap environment — download proot binary if needed.
+     * This is called before rootfs extraction.
      */
     fun setupBootstrap(onProgress: (Double, String) -> Unit) {
         Thread {
@@ -75,31 +107,29 @@ class ProotManager(private val context: Context) {
                 onProgress(0.05, "Creating directories...")
                 prootDir.mkdirs()
 
-                onProgress(0.1, "Checking proot installation...")
+                onProgress(0.2, "Checking proot installation...")
+                val proot = prootBinary()
                 val bash = bashPath()
 
-                onProgress(0.2, "Setting up bootstrap script...")
+                onProgress(0.4, "Installing base packages...")
+                // Try installing via pkg (Termux only), but don't crash if not available
+                if (File("/data/data/com.termux/files/usr/bin/bash").exists()) {
+                    try {
+                        executeShellCommand("$bash -c 'pkg install -y proot tar x11-repo 2>/dev/null || true'")
+                    } catch (_: Exception) {}
+                }
+
+                onProgress(0.6, "Setting up bootstrap script...")
                 writeBootstrapScript()
 
-                onProgress(0.3, "Installing base packages...")
-                // Try installing via pkg (Termux), but don't crash if it fails
-                try {
-                    executeShellCommand("$bash -c 'pkg install -y proot tar x11-repo 2>/dev/null || true'")
-                } catch (_: Exception) {}
-
-                onProgress(0.5, "Installing PRoot utilities...")
-                try {
-                    executeShellCommand(
-                        "$bash -c 'pkg install -y proot curl wget git python build-essential x11-apps xterm 2>/dev/null || true'"
-                    )
-                } catch (_: Exception) {}
-
-                onProgress(0.7, "Installing display servers...")
-                try {
-                    executeShellCommand(
-                        "$bash -c 'pkg install -y termux-x11-nightly pulseaudio virglrenderer-mesa-zink 2>/dev/null || true'"
-                    )
-                } catch (_: Exception) {}
+                onProgress(0.8, "Installing additional tools...")
+                if (File("/data/data/com.termux/files/usr/bin/bash").exists()) {
+                    try {
+                        executeShellCommand(
+                            "$bash -c 'pkg install -y proot curl wget git python build-essential x11-apps xterm termux-x11-nightly pulseaudio virglrenderer-mesa-zink 2>/dev/null || true'"
+                        )
+                    } catch (_: Exception) {}
+                }
 
                 onProgress(1.0, "Bootstrap complete!")
             } catch (e: Exception) {
@@ -110,8 +140,7 @@ class ProotManager(private val context: Context) {
 
     /**
      * Install a desktop environment inside the proot container.
-     * @param de Desktop environment: xfce4, lxqt, mate, kde
-     * @param type Installation type: minimal or full
+     * Runs apt install INSIDE the proot container (not pkg install from Termux).
      */
     fun installDesktopEnvironment(
         de: String,
@@ -122,18 +151,38 @@ class ProotManager(private val context: Context) {
 
         Thread {
             try {
-                sendProgress(channel, 0.05, "Installing $de ($type)...")
+                val distro = detectInstalledDistro().ifEmpty { "ubuntu" }
+                sendProgress(channel, 0.05, "Preparing $de ($type) installation...")
 
+                // Step 1: Update apt inside proot container
+                val prootPrefix = buildProotExecPrefix(distro)
+                val bash = bashPath()
+
+                sendProgress(channel, 0.1, "Updating package lists...")
+                executeShellCommand(
+                    "$bash -c '$prootPrefix /bin/bash -c \"apt update -y 2>/dev/null || true\"'"
+                )
+
+                // Step 2: Install DE packages inside proot container via apt
                 val packages = getDEPackages(de, type)
-                val cmd = "pkg install -y $packages"
-                sendProgress(channel, 0.1, "Installing packages...")
+                sendProgress(channel, 0.2, "Installing $de packages (this may take a while)...")
 
-                executeShellCommand(cmd)
-                sendProgress(channel, 0.5, "Configuring desktop environment...")
+                // Run apt install with progress streaming
+                val aptCmd = "$bash -c '$prootPrefix /bin/bash -c \"DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends $packages 2>&1\"'"
+                executeLongCommand(aptCmd, channel, 0.2, 0.7)
 
+                // Step 3: Install additional base tools inside proot
+                sendProgress(channel, 0.75, "Installing base tools (dbus, fonts)...")
+                val baseCmd = "$bash -c '$prootPrefix /bin/bash -c \"DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends dbus-x11 fonts-liberation fonts-dejavu-core sudo wget curl 2>&1 || true\"'"
+                executeLongCommand(baseCmd, channel, 0.75, 0.85)
+
+                // Step 4: Configure DE
+                sendProgress(channel, 0.88, "Configuring desktop environment...")
                 configureDE(de, type)
-                sendProgress(channel, 0.8, "Installing GPU drivers...")
-                installGPUDrivers()
+
+                // Step 5: Install GPU drivers inside proot
+                sendProgress(channel, 0.92, "Installing GPU drivers...")
+                installGPUDriversInsideProot(distro)
 
                 sendProgress(channel, 1.0, "$de installation complete!")
             } catch (e: Exception) {
@@ -144,10 +193,6 @@ class ProotManager(private val context: Context) {
 
     /**
      * Start the Linux desktop session.
-     * @param de Desktop environment
-     * @param mode Display mode: vnc or x11
-     * @param width Display width
-     * @param height Display height
      */
     fun startLinux(
         de: String,
@@ -155,7 +200,7 @@ class ProotManager(private val context: Context) {
         width: Int,
         height: Int
     ) {
-        stopLinux() // Kill any existing session
+        stopLinux()
 
         Thread {
             try {
@@ -179,7 +224,6 @@ class ProotManager(private val context: Context) {
         }
         runningProcess = null
 
-        // Kill proot processes (ignore errors)
         val bash = bashPath()
         try { executeShellCommand("$bash -c 'pkill -f proot || true'") } catch (_: Exception) {}
         try { executeShellCommand("$bash -c 'pkill -f Xvnc || true'") } catch (_: Exception) {}
@@ -189,7 +233,7 @@ class ProotManager(private val context: Context) {
         try { executeShellCommand("$bash -c 'pkill -f startplasma-wayland || true'") } catch (_: Exception) {}
     }
 
-    /** Backup the container to a tar.gz file */
+    /** Backup the container */
     fun backupContainer(name: String) {
         Thread {
             try {
@@ -197,8 +241,9 @@ class ProotManager(private val context: Context) {
                 backupDir.mkdirs()
                 val backupFile = File(backupDir, "backup_${name}_${System.currentTimeMillis()}.tar.gz")
                 val bash = bashPath()
+                val distro = detectInstalledDistro().ifEmpty { "ubuntu" }
                 executeShellCommand(
-                    "$bash -c 'tar -czf \"${backupFile.absolutePath}\" -C \"${prootDir}\" ubuntu'"
+                    "$bash -c 'tar -czf \"${backupFile.absolutePath}\" -C \"${prootDir}\" \"$distro\"'"
                 )
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -206,7 +251,7 @@ class ProotManager(private val context: Context) {
         }.start()
     }
 
-    /** Restore the container from a backup file */
+    /** Restore the container from a backup */
     fun restoreContainer(name: String) {
         Thread {
             try {
@@ -216,12 +261,10 @@ class ProotManager(private val context: Context) {
                 }?.sortedByDescending { it.lastModified() }
 
                 if (backupFiles != null && backupFiles.isNotEmpty()) {
-                    // Stop existing session
                     stopLinux()
-                    // Remove current rootfs
-                    val rootfsDir = File(prootDir, "ubuntu")
+                    val distro = detectInstalledDistro().ifEmpty { "ubuntu" }
+                    val rootfsDir = File(prootDir, distro)
                     rootfsDir.deleteRecursively()
-                    // Restore from backup
                     val bash = bashPath()
                     executeShellCommand(
                         "$bash -c 'tar -xzf \"${backupFiles.first().absolutePath}\" -C \"${prootDir}\"'"
@@ -233,7 +276,7 @@ class ProotManager(private val context: Context) {
         }.start()
     }
 
-    /** Cleanup when the activity is destroyed */
+    /** Cleanup when activity is destroyed */
     fun cleanup() {
         stopLinux()
         terminalProcess?.destroyForcibly()
@@ -248,8 +291,7 @@ class ProotManager(private val context: Context) {
         width: Int,
         height: Int
     ): String {
-        val rootfsDir = File(prootDir, detectInstalledDistro().ifEmpty { "ubuntu" })
-        val prootRoot = rootfsDir.absolutePath
+        val prootRoot = getRootfsDir().absolutePath
         val proot = prootBinary()
 
         val prootArgs = buildString {
@@ -304,8 +346,7 @@ class ProotManager(private val context: Context) {
     }
 
     private fun configureDE(de: String, type: String) {
-        val distro = detectInstalledDistro().ifEmpty { "ubuntu" }
-        val rootfsDir = File(prootDir, distro)
+        val rootfsDir = getRootfsDir()
         val configDir = File(rootfsDir, ".config")
         configDir.mkdirs()
 
@@ -322,6 +363,11 @@ class ProotManager(private val context: Context) {
   </property>
 </channel>"""
                 )
+                // Create XFCE start script
+                val xinitrc = File(rootfsDir, "root/.xinitrc")
+                xinitrc.parentFile?.mkdirs()
+                xinitrc.writeText("#!/bin/bash\nexec startxfce4\n")
+                xinitrc.setExecutable(true)
             }
             "lxqt" -> {
                 val lxqtConfig = File(configDir, "lxqt/lxqt.conf")
@@ -333,38 +379,76 @@ class ProotManager(private val context: Context) {
                 mateConfig.parentFile?.mkdirs()
             }
         }
+
+        // Create a common start script for VNC
+        val vncStart = File(rootfsDir, "usr/local/bin/start-vnc.sh")
+        vncStart.parentFile?.mkdirs()
+        vncStart.writeText(
+            """#!/bin/bash
+export DISPLAY=:1
+export PULSE_SERVER=tcp:127.0.0.1:4713
+vncserver -geometry 1920x1080 -depth 24 :1 2>/dev/null || true
+sleep infinity
+"""
+        )
+        vncStart.setExecutable(true)
     }
 
-    private fun installGPUDrivers() {
-        val gpuVendor = detectGPUVendor()
-        when {
-            gpuVendor.contains("adreno", ignoreCase = true) -> {
-                executeShellCommand("pkg install -y mesa-vulkan-icd-freedreno || true")
+    /**
+     * Install GPU drivers INSIDE the proot container via apt.
+     */
+    private fun installGPUDriversInsideProot(distro: String) {
+        val bash = bashPath()
+        val prootPrefix = buildProotExecPrefix(distro)
+
+        // Install mesa drivers inside proot — always install generic mesa as fallback
+        try {
+            executeShellCommand(
+                "$bash -c '$prootPrefix /bin/bash -c \"DEBIAN_FRONTEND=noninteractive apt install -y mesa-utils libgl1-mesa-dri libgl1-mesa-glx libegl1-mesa libgles2-mesa 2>&1 || true\"'"
+            )
+        } catch (_: Exception) {}
+
+        // Try specific GPU drivers (best-effort)
+        val gpuVendor = getGPUVendor()
+        try {
+            when {
+                gpuVendor.contains("adreno", ignoreCase = true) || gpuVendor.contains("qualcomm", ignoreCase = true) -> {
+                    executeShellCommand(
+                        "$bash -c '$prootPrefix /bin/bash -c \"DEBIAN_FRONTEND=noninteractive apt install -y mesa-vulkan-drivers 2>&1 || true\"'"
+                    )
+                }
+                gpuVendor.contains("mali", ignoreCase = true) -> {
+                    executeShellCommand(
+                        "$bash -c '$prootPrefix /bin/bash -c \"DEBIAN_FRONTEND=noninteractive apt install -y libmali-midgard-gbm 2>&1 || true\"'"
+                    )
+                }
             }
-            gpuVendor.contains("mali", ignoreCase = true) -> {
-                executeShellCommand("pkg install -y mesa-panfrost-dri || true")
-            }
-            else -> {
-                executeShellCommand("pkg install -y mesa-zink || true")
-            }
-        }
+        } catch (_: Exception) {}
     }
 
-    private fun detectGPUVendor(): String {
+    /**
+     * Detect GPU vendor using Android system properties (no shell needed).
+     */
+    private fun getGPUVendor(): String {
         return try {
-            val result = executeShellCommand("getprop ro.hardware.chipset")
-            result.lowercase()
+            // Method 1: Use Build class to detect chipset
+            val board = Build.BOARD?.lowercase() ?: ""
+            val hardware = Build.HARDWARE?.lowercase() ?: ""
+            val chipset = Build.SOC_MANUFACTURER?.lowercase() ?: ""
+            val model = Build.MODEL?.lowercase() ?: ""
+
+            val combined = "$board $hardware $chipset $model"
+            combined
         } catch (_: Exception) {
             ""
         }
     }
 
     private fun detectInstalledDistro(): String {
-        // Check proot directory for installed distros
         if (prootDir.exists()) {
             prootDir.listFiles()?.forEach { dir ->
                 if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
-                    && dir.name != "backups") {
+                    && dir.name != "backups" && dir.name != "backups") {
                     return dir.name
                 }
             }
@@ -373,10 +457,9 @@ class ProotManager(private val context: Context) {
     }
 
     private fun detectInstalledDE(): String {
-        val distro = detectInstalledDistro().ifEmpty { return "" }
-        val rootfsDir = File(prootDir, distro)
+        val rootfsDir = getRootfsDir()
+        if (!rootfsDir.exists()) return ""
 
-        // Check common DE indicator files
         val checks = mapOf(
             "xfce4" to "usr/bin/startxfce4",
             "lxqt" to "usr/bin/startlxqt",
@@ -406,19 +489,50 @@ class ProotManager(private val context: Context) {
         }
     }
 
+    /**
+     * Execute a long-running command (like apt install) with streaming progress.
+     * Reports progress between [progressStart] and [progressEnd].
+     */
+    private fun executeLongCommand(
+        command: String,
+        channel: MethodChannel,
+        progressStart: Double,
+        progressEnd: Double
+    ) {
+        val bash = bashPath()
+        try {
+            val process = Runtime.getRuntime().exec(
+                arrayOf(bash, "-c", command)
+            )
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val errorReader = BufferedReader(InputStreamReader(process.errorStream))
+
+            // Drain stderr in background
+            Thread { errorReader.readText() }.start()
+
+            var lineCount = 0
+            while (true) {
+                val line = reader.readLine() ?: break
+                lineCount++
+                // Send progress updates periodically (every 50 lines)
+                if (lineCount % 50 == 0) {
+                    val progress = progressStart + (progressEnd - progressStart) * 0.8
+                    sendProgress(channel, progress, "Installing packages... ($lineCount lines processed)")
+                }
+            }
+
+            process.waitFor()
+        } catch (e: Exception) {
+            // Non-fatal
+        }
+    }
+
     private fun writeBootstrapScript() {
         try {
             bootstrapScript.writeText(
                 """#!/system/bin/sh
 # DroidForge Bootstrap Script
 echo "Setting up DroidForge environment..."
-
-# Update packages
-pkg update -y 2>/dev/null || true
-
-# Install core dependencies
-pkg install -y proot tar x11-repo proot-distro 2>/dev/null || true
-
 echo "Bootstrap complete!"
 """
             )
@@ -431,7 +545,6 @@ echo "Bootstrap complete!"
         progress: Double,
         status: String
     ) {
-        // Marshal to main thread for safety
         mainHandler.post {
             try {
                 channel.invokeMethod(

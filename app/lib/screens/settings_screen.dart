@@ -48,7 +48,17 @@ class SettingsScreen extends StatelessWidget {
                       iconColor: DroidTheme.warning,
                       title: 'Battery Optimization',
                       subtitle: 'Disable to prevent session killing',
-                      onTap: () => DroidDeskPlatform.requestBatteryOptimization(),
+                      onTap: () async {
+                        final result = await DroidDeskPlatform.requestBatteryOptimization();
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: const Text('Opened battery settings — add DroidForge to the ignore list'),
+                              backgroundColor: DroidTheme.info,
+                            ),
+                          );
+                        }
+                      },
                     ),
 
                     _SettingsTile(

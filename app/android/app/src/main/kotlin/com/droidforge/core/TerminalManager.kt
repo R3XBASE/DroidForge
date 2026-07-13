@@ -43,9 +43,15 @@ class TerminalManager(private val context: Context) {
 
     /** Find a working shell inside the rootfs */
     private fun rootfsShell(rootfsDir: File): String {
-        val candidates = listOf("/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh")
+        val candidates = listOf(
+            "/bin/bash", "/usr/bin/bash",
+            "/bin/sh", "/usr/bin/sh",
+            "/bin/dash", "/usr/bin/dash",
+            "/bin/busybox", "/usr/bin/busybox"
+        )
         for (c in candidates) {
-            if (File(rootfsDir, c.substring(1)).exists()) return c
+            val f = File(rootfsDir, c.substring(1))
+            if (f.exists() && f.length() > 0) return c
         }
         return "/bin/sh"
     }

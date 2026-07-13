@@ -60,10 +60,17 @@ class ProotManager(private val context: Context) {
      * Ubuntu cloudimg rootfs may not have /bin/bash, try /bin/sh first.
      */
     private fun rootfsShell(rootfsDir: File): String {
-        val candidates = listOf("/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh")
+        val candidates = listOf(
+            "/bin/bash", "/usr/bin/bash",
+            "/bin/sh", "/usr/bin/sh",
+            "/bin/dash", "/usr/bin/dash",
+            "/bin/busybox", "/usr/bin/busybox"
+        )
         for (c in candidates) {
-            if (File(rootfsDir, c.substring(1)).exists()) return c
+            val f = File(rootfsDir, c.substring(1))
+            if (f.exists() && f.length() > 0) return c
         }
+        // Last resort: return /bin/sh (RootfsManager fixMergedUsr should have created it)
         return "/bin/sh"
     }
 
@@ -187,13 +194,20 @@ class ProotManager(private val context: Context) {
         }
     }
 
-    /** Check if the proot environment is bootstrapped */
+    /** Check if the proot environment is bootstrapped and has a working rootfs */
     fun isBootstrapped(): Boolean {
         if (prootDir.exists()) {
             prootDir.listFiles()?.forEach { dir ->
                 if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
                     && dir.name != "backups" && dir.name != "proot_tmp") {
-                    return true
+                    // Also verify /bin/sh exists in the rootfs (merged-usr may have broken symlinks)
+                    val shell = rootfsShell(dir)
+                    val shellFile = File(dir, shell.substring(1))
+                    if (shellFile.exists() && shellFile.length() > 0) {
+                        return true
+                    }
+                    // Rootfs exists but has no shell — broken extraction, not bootstrapped
+                    return false
                 }
             }
         }

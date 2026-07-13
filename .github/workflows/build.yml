@@ -141,38 +141,41 @@ jobs:
       - name: Build APK (Release)
         if: steps.build_mode.outputs.mode == 'release'
         id: build_release
+        continue-on-error: true
         run: |
-          flutter build apk --release
+          flutter build apk --release || true
+          # Flutter 3.44.6 + AGP 8.x: APK is at android/app/build/outputs/ 
+          # but Flutter tool looks at build/app/outputs/. Copy to expected path.
+          mkdir -p build/app/outputs/flutter-apk
+          cp android/app/build/outputs/flutter-apk/*.apk build/app/outputs/flutter-apk/ 2>/dev/null || true
 
       - name: Build APK (Debug)
         if: steps.build_mode.outputs.mode == 'debug'
         id: build_debug
-        run: flutter build apk --debug
+        continue-on-error: true
+        run: |
+          flutter build apk --debug || true
+          mkdir -p build/app/outputs/flutter-apk
+          cp android/app/build/outputs/flutter-apk/*.apk build/app/outputs/flutter-apk/ 2>/dev/null || true
 
       - name: Collect APK
         id: locate_apk
         if: ${{ always() }}
         run: |
           echo "=== Collecting APK ==="
-          # Gradle copy task in build.gradle.kts copies APK to Flutter's expected path
-          # Fallback: check both standard paths and search
           
           VERSION="${{ steps.version.outputs.version }}"
-          MODE="${{ steps.build_mode.outputs.mode }}"
           DEST_DIR="build/app/outputs/flutter-apk"
           FOUND=""
           
-          # 1. Flutter's expected path (after Gradle copy task)
           if [ -f "${DEST_DIR}/app-release.apk" ]; then
             FOUND="${DEST_DIR}/app-release.apk"
           elif [ -f "${DEST_DIR}/app-debug.apk" ]; then
             FOUND="${DEST_DIR}/app-debug.apk"
-          # 2. AGP direct output (before copy)
           elif [ -f "android/app/build/outputs/flutter-apk/app-release.apk" ]; then
             FOUND="android/app/build/outputs/flutter-apk/app-release.apk"
           elif [ -f "android/app/build/outputs/flutter-apk/app-debug.apk" ]; then
             FOUND="android/app/build/outputs/flutter-apk/app-debug.apk"
-          # 3. Search entire project as last resort
           else
             FOUND=$(find . -name "*.apk" -path "*/outputs/*" -type f 2>/dev/null | head -1)
           fi
@@ -186,7 +189,6 @@ jobs:
           else
             echo "apk_found=false" >> $GITHUB_OUTPUT
             echo "❌ No APK found!"
-            echo "=== Directory listing ==="
             find . -name "*.apk" -type f 2>/dev/null || true
           fi
 

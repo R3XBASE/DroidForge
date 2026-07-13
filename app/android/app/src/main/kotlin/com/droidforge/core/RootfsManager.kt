@@ -155,19 +155,22 @@ class RootfsManager(private val context: Context) {
                 sendProgress(channel, "onExtractProgress", 0.1, "Extracting ${archiveFile.name} (${fileSize / 1024 / 1024}MB)...")
 
                 // Extract using tar based on file type
+                // -o flag: ignore owner (prevents "Permission denied" on Android FUSE)
+                // Android FUSE doesn't support hard links, so tar may warn about
+                // "can't link" — these are non-fatal warnings, not errors.
+                // proot-distro materializes hard links as independent copies.
                 val command = when {
                     archiveFile.name.endsWith(".tar.zst") -> {
-                        // zstd decompression — may not be available on all Android devices
-                        "zstd -d '${archiveFile.absolutePath}' --stdout | tar -xf - -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
+                        "zstd -d '${archiveFile.absolutePath}' --stdout | tar -xof - -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
                     }
                     archiveFile.name.endsWith(".tar.xz") -> {
-                        "tar -xJf '${archiveFile.absolutePath}' -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
+                        "tar -xJof '${archiveFile.absolutePath}' -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
                     }
                     archiveFile.name.endsWith(".tar.gz") || archiveFile.name.endsWith(".tgz") -> {
-                        "tar -xzf '${archiveFile.absolutePath}' -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
+                        "tar -xzof '${archiveFile.absolutePath}' -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
                     }
                     else -> {
-                        "tar -xf '${archiveFile.absolutePath}' -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
+                        "tar -xof '${archiveFile.absolutePath}' -C '${rootfsDir}' --strip-components=0 2>&1; echo EXIT_CODE=\$?"
                     }
                 }
 
@@ -202,8 +205,19 @@ class RootfsManager(private val context: Context) {
                 val exitCode = process.waitFor()
                 val output = outputLines.joinToString("\n")
 
-                // Check if extraction actually worked
-                if (exitCode != 0 || output.contains("EXIT_CODE=1") || output.contains("EXIT_CODE=2")) {
+                // Parse the EXIT_CODE from our wrapper
+                val extractedExitCode = Regex("EXIT_CODE=(\\d+)").find(output)?.groupValues?.get(1)?.toIntOrNull() ?: exitCode
+
+                // Classify tar output:
+                // - "can't link" warnings = Android FUSE hard link limitation (NON-FATAL)
+                // - "Permission denied" on hard links = same issue (NON-FATAL)
+                // - EXIT_CODE=2 or "No such file" = actual failure (FATAL)
+                val hasHardLinkWarnings = output.contains("can't link") || output.contains("Permission denied")
+                val isFatalError = extractedExitCode >= 2
+                    && !output.contains("can't link")
+                    && !output.contains("EXIT_CODE=1")
+
+                if (isFatalError) {
                     val hint = when {
                         archiveFile.name.endsWith(".tar.xz") && output.contains("xz") ->
                             "Your device may not support xz decompression. Try Ubuntu or Alpine (tar.gz format)."
@@ -212,8 +226,13 @@ class RootfsManager(private val context: Context) {
                         else -> ""
                     }
                     sendProgress(channel, "onExtractProgress", -1.0,
-                        "tar extraction failed (exit $exitCode). $hint\nOutput:\n${output.takeLast(500)}")
+                        "tar extraction failed (exit $extractedExitCode). $hint\nOutput:\n${output.takeLast(500)}")
                     return@Thread
+                }
+
+                if (hasHardLinkWarnings) {
+                    sendProgress(channel, "onExtractProgress", 0.8,
+                        "Extracted (some hard links skipped — normal on Android)")
                 }
 
                 sendProgress(channel, "onExtractProgress", 0.85, "Validating rootfs...")

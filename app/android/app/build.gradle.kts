@@ -54,3 +54,23 @@ android {
 flutter {
     source = "../.."
 }
+
+// Copy APK to Flutter's expected output path after assemble tasks.
+// AGP 8.x outputs to android/app/build/outputs/flutter-apk/ but Flutter
+// tool looks for it at build/app/outputs/flutter-apk/ (Flutter project root).
+tasks.configureEach {
+    if (name.startsWith("assemble")) {
+        doLast {
+            val srcDir = file("build/outputs/flutter-apk")
+            val destDir = rootProject.file("../build/app/outputs/flutter-apk")
+            if (srcDir.exists() && destDir.parentFile != null) {
+                destDir.mkdirs()
+                srcDir.listFiles()?.forEach { apk ->
+                    val dest = File(destDir, apk.name)
+                    apk.copyTo(dest, overwrite = true)
+                    println("Copied ${apk.name} → ${dest.absolutePath}")
+                }
+            }
+        }
+    }
+}

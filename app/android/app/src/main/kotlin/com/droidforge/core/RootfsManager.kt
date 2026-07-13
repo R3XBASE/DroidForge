@@ -21,7 +21,7 @@ class RootfsManager(private val context: Context) {
     // Distro rootfs download URLs
     private val distroUrls = mapOf(
         "ubuntu" to "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64-root.tar.xz",
-        "debian" to "https://cdimage.debian.org/cdimage/cloud/bookworm/daily/latest/debian-12-generic-arm64-daily.root.tar.xz",
+        "debian" to "https://cdimage.debian.org/cdimage/cloud/bookworm/daily/latest/debian-12-genericarm64-daily.root.tar.xz",
         "kali-nethunter" to "https://images.kali.org/kali-2024.2-kali-rootfs-arm64.tar.xz",
         "archlinux" to "https://gitlab.archlinux.org/archlinux/archlinux-docker/-/packages/20849842/raw/latest/file/RootFs-x86_64.tar.xz",
         "alpine" to "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-rootfs-3.20.1-aarch64.tar.gz"
@@ -30,11 +30,13 @@ class RootfsManager(private val context: Context) {
     private val prootDir: File = File(context.filesDir, "proot")
     private val downloadDir: File = File(context.filesDir, "downloads")
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val binaryManager = BinaryManager(context)
 
-    /** Resolve the bash path — try Termux first, fall back to system sh */
+    /** Resolve the shell path — try Termux bash first, fall back to system sh */
     private fun bashPath(): String {
         val termuxBash = File("/data/data/com.termux/files/usr/bin/bash")
-        return if (termuxBash.exists()) termuxBash.absolutePath else "/system/bin/sh"
+        if (termuxBash.exists()) return termuxBash.absolutePath
+        return "/system/bin/sh"
     }
 
     /**

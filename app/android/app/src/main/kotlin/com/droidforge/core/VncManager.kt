@@ -10,10 +10,11 @@ import java.io.File
  */
 class VncManager(private val context: Context) {
 
-    /** Resolve the bash path — try Termux first, fall back to system sh */
+    /** Resolve the shell path — try Termux bash first, fall back to system sh */
     private fun bashPath(): String {
         val termuxBash = File("/data/data/com.termux/files/usr/bin/bash")
-        return if (termuxBash.exists()) termuxBash.absolutePath else "/system/bin/sh"
+        if (termuxBash.exists()) return termuxBash.absolutePath
+        return "/system/bin/sh"
     }
 
     /** Launch the Termux-X11 activity to display the desktop */

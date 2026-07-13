@@ -18,11 +18,20 @@ class TerminalManager(private val context: Context) {
 
     private var currentProcess: Process? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val binaryManager = BinaryManager(context)
 
-    /** Resolve the bash path — try Termux first, fall back to system sh */
+    /** Resolve the shell path — try Termux bash first, then system sh */
     private fun bashPath(): String {
         val termuxBash = File("/data/data/com.termux/files/usr/bin/bash")
-        return if (termuxBash.exists()) termuxBash.absolutePath else "/system/bin/sh"
+        if (termuxBash.exists()) return termuxBash.absolutePath
+        return "/system/bin/sh"
+    }
+
+    /** Get proot binary path */
+    private fun prootBinary(): String {
+        val termuxProot = File("/data/data/com.termux/files/usr/bin/proot")
+        if (termuxProot.exists()) return termuxProot.absolutePath
+        return binaryManager.getProotPath()
     }
 
     /**
@@ -49,8 +58,11 @@ class TerminalManager(private val context: Context) {
 
                 val process = if (isBootstrapped) {
                     // Run command inside proot
+                    val proot = prootBinary()
+                    val libPath = binaryManager.getLibPath()
+                    val homeDir = context.getExternalFilesDir(null) ?: context.filesDir
                     val prootCmd = buildString {
-                        append("proot")
+                        append(proot)
                         append(" -0")
                         append(" -w /root")
                         append(" --link2symlink")
@@ -59,9 +71,10 @@ class TerminalManager(private val context: Context) {
                         append(" -b /sys")
                         append(" -b /dev/urandom:/dev/random")
                         append(" -b ${distroDir.absolutePath}/:/root")
-                        append(" -b /data/data/com.termux/files/home:/home")
+                        append(" -b ${homeDir.absolutePath}:/home")
                         append(" -r ${distroDir.absolutePath}")
                         append(" --kill-on-exit")
+                        append(" --env LD_LIBRARY_PATH=$libPath")
                         append(" -- /bin/bash -c '$command 2>&1'")
                     }
                     Runtime.getRuntime().exec(

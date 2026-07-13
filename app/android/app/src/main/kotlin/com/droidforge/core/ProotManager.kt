@@ -25,20 +25,22 @@ class ProotManager(private val context: Context) {
     private var runningProcess: Process? = null
     private var terminalProcess: Process? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val binaryManager = BinaryManager(context)
 
-    /** Resolve the bash path — try Termux first, fall back to system sh */
+    /** Resolve the shell path — try Termux bash, then bundled binary, fall back to system sh */
     private fun bashPath(): String {
         val termuxBash = File("/data/data/com.termux/files/usr/bin/bash")
-        return if (termuxBash.exists()) termuxBash.absolutePath else "/system/bin/sh"
+        if (termuxBash.exists()) return termuxBash.absolutePath
+        val bundledBash = binaryManager.getBinaryPath("bash")
+        if (bundledBash != null) return bundledBash
+        return "/system/bin/sh"
     }
 
-    /** Resolve the proot binary path — check Termux first */
+    /** Resolve the proot binary path — check Termux first, then bundled assets */
     private fun prootBinary(): String {
         val termuxProot = File("/data/data/com.termux/files/usr/bin/proot")
         if (termuxProot.exists()) return termuxProot.absolutePath
-        val localProot = File(context.filesDir, "proot/proot-arm64")
-        if (localProot.exists()) return localProot.absolutePath
-        return "proot"
+        return binaryManager.getProotPath()
     }
 
     /** Get the installed rootfs directory for the current distro */
@@ -63,6 +65,8 @@ class ProotManager(private val context: Context) {
         val rootfsDir = getRootfsDir(distro)
         val prootRoot = rootfsDir.absolutePath
         val proot = prootBinary()
+        val loader = binaryManager.getProotLoaderPath()
+        val libPath = binaryManager.getLibPath()
 
         return buildString {
             append(proot)
@@ -80,10 +84,13 @@ class ProotManager(private val context: Context) {
                 append(" -b /etc/resolv.conf")
             }
             // Home directory
-            append(" -b /data/data/com.termux/files/home:/home")
+            val homeDir = context.getExternalFilesDir(null) ?: context.filesDir
+            append(" -b ${homeDir.absolutePath}:/home")
             // Root filesystem
             append(" -r $prootRoot")
             append(" --kill-on-exit")
+            // LD_LIBRARY_PATH for bundled libs
+            append(" --env LD_LIBRARY_PATH=$libPath")
             append(" --")
         }
     }
@@ -206,8 +213,8 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
     }
 
     /**
-     * Set up the bootstrap environment — download proot binary if needed.
-     * This is called before rootfs extraction.
+     * Set up the bootstrap environment — extract bundled binaries.
+     * No longer requires Termux or network access for proot.
      */
     fun setupBootstrap(onProgress: (Double, String) -> Unit) {
         Thread {
@@ -215,29 +222,17 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
                 onProgress(0.05, "Creating directories...")
                 prootDir.mkdirs()
 
-                onProgress(0.2, "Checking proot installation...")
-                val proot = prootBinary()
-                val bash = bashPath()
+                onProgress(0.2, "Extracting proot binaries...")
+                binaryManager.ensureBinaries()
 
-                onProgress(0.4, "Installing base packages...")
-                // Try installing via pkg (Termux only), but don't crash if not available
-                if (File("/data/data/com.termux/files/usr/bin/bash").exists()) {
-                    try {
-                        executeShellCommand("$bash -c 'pkg install -y proot tar x11-repo 2>/dev/null || true'")
-                    } catch (_: Exception) {}
-                }
-
-                onProgress(0.6, "Setting up bootstrap script...")
+                onProgress(0.5, "Setting up bootstrap script...")
                 writeBootstrapScript()
 
-                onProgress(0.8, "Installing additional tools...")
-                if (File("/data/data/com.termux/files/usr/bin/bash").exists()) {
-                    try {
-                        executeShellCommand(
-                            "$bash -c 'pkg install -y proot curl wget git python build-essential x11-apps xterm termux-x11-nightly pulseaudio virglrenderer-mesa-zink 2>/dev/null || true'"
-                        )
-                    } catch (_: Exception) {}
-                }
+                onProgress(0.8, "Verifying installation...")
+                val proot = prootBinary()
+                val shell = bashPath()
+                onProgress(0.9, "Proot: $proot")
+                onProgress(0.95, "Shell: $shell")
 
                 onProgress(1.0, "Bootstrap complete!")
             } catch (e: Exception) {
@@ -434,6 +429,7 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
     ): String {
         val prootRoot = getRootfsDir().absolutePath
         val proot = prootBinary()
+        val libPath = binaryManager.getLibPath()
 
         val prootArgs = buildString {
             append(proot)
@@ -448,9 +444,11 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
             if (resolvConf.exists()) {
                 append(" -b /etc/resolv.conf")
             }
-            append(" -b /data/data/com.termux/files/home:/home")
+            val homeDir = context.getExternalFilesDir(null) ?: context.filesDir
+            append(" -b ${homeDir.absolutePath}:/home")
             append(" -r $prootRoot")
             append(" --kill-on-exit")
+            append(" --env LD_LIBRARY_PATH=$libPath")
             append(" --")
         }
 

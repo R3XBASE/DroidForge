@@ -13,10 +13,11 @@ import java.io.InputStreamReader
 /**
  * ProotManager — handles proot container lifecycle.
  *
- * - Bootstrap proot environment
- * - Install desktop environments (via apt INSIDE proot container)
- * - Start/stop Linux sessions
- * - Backup/restore containers
+ * IMPORTANT proot v5.1.0 notes:
+ *   - NO '--' option separator — command follows directly after options
+ *   - PROOT_TMP_DIR MUST be set to a writable dir (Android /tmp is not writable)
+ *   - LD_LIBRARY_PATH must be on HOST side, not via --env
+ *   - Rootfs may not have /bin/bash, use /bin/sh as fallback
  */
 class ProotManager(private val context: Context) {
 
@@ -27,12 +28,17 @@ class ProotManager(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val binaryManager = BinaryManager(context)
 
-    /** Resolve the shell path — try Termux bash, then bundled binary, fall back to system sh */
+    /** Writable tmp dir for proot — Android /tmp is not writable */
+    private val prootTmpDir: File by lazy {
+        val dir = File(context.filesDir, "proot_tmp")
+        dir.mkdirs()
+        dir
+    }
+
+    /** Resolve the shell path — try Termux bash, fall back to system sh */
     private fun bashPath(): String {
         val termuxBash = File("/data/data/com.termux/files/usr/bin/bash")
         if (termuxBash.exists()) return termuxBash.absolutePath
-        val bundledBash = binaryManager.getBinaryPath("bash")
-        if (bundledBash != null) return bundledBash
         return "/system/bin/sh"
     }
 
@@ -50,26 +56,37 @@ class ProotManager(private val context: Context) {
     }
 
     /**
-     * Build a proot command prefix that runs inside the container.
-     *
-     * Bind mounts:
-     *   /dev, /proc, /sys       — standard Linux namespaces
-     *   /dev/urandom:/dev/random — entropy
-     *   /data/data/com.termux/files/home:/home — home directory access
-     *   /etc/resolv.conf         — DNS resolution (critical for apt)
-     *   tmp dir for apt locks     — avoid lock contention
-     *
-     * NOTE: We do NOT bind -b $prootRoot because that's the root itself (-r).
+     * Find a working shell inside the rootfs.
+     * Ubuntu cloudimg rootfs may not have /bin/bash, try /bin/sh first.
      */
-    private fun buildProotExecPrefix(distro: String? = null): String {
+    private fun rootfsShell(rootfsDir: File): String {
+        val candidates = listOf("/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh")
+        for (c in candidates) {
+            if (File(rootfsDir, c.substring(1)).exists()) return c
+        }
+        return "/bin/sh"
+    }
+
+    /**
+     * Build environment prefix: LD_LIBRARY_PATH + PROOT_TMP_DIR
+     * These MUST be set on the HOST side (shell env vars, not proot --env).
+     */
+    private fun buildEnvPrefix(): String {
+        val libPath = binaryManager.getLibPath()
+        return "LD_LIBRARY_PATH=$libPath PROOT_TMP_DIR=${prootTmpDir.absolutePath}"
+    }
+
+    /**
+     * Build proot options prefix (everything before the command to execute).
+     * NOTE: proot v5.1.0 does NOT support '--' separator.
+     */
+    private fun buildProotOptions(distro: String? = null): String {
         val rootfsDir = getRootfsDir(distro)
         val prootRoot = rootfsDir.absolutePath
         val proot = prootBinary()
-        val libPath = binaryManager.getLibPath()
+        val homeDir = context.getExternalFilesDir(null) ?: context.filesDir
 
         return buildString {
-            // LD_LIBRARY_PATH on HOST side — proot binary itself needs libtalloc.so.2
-            append("LD_LIBRARY_PATH=$libPath ")
             append(proot)
             append(" -0")
             append(" -w /root")
@@ -79,13 +96,12 @@ class ProotManager(private val context: Context) {
             append(" -b /proc")
             append(" -b /sys")
             append(" -b /dev/urandom:/dev/random")
-            // DNS resolution — required for apt to resolve mirrors
+            // DNS resolution
             val resolvConf = File("/etc/resolv.conf")
             if (resolvConf.exists()) {
                 append(" -b /etc/resolv.conf")
             }
             // Home directory
-            val homeDir = context.getExternalFilesDir(null) ?: context.filesDir
             append(" -b ${homeDir.absolutePath}:/home")
             // Root filesystem
             append(" -r $prootRoot")
@@ -94,24 +110,27 @@ class ProotManager(private val context: Context) {
     }
 
     /**
+     * Full proot command prefix: env vars + proot options.
+     * Usage: "${buildProotExecPrefix()} /bin/sh -c '...'"
+     */
+    private fun buildProotExecPrefix(distro: String? = null): String {
+        return "${buildEnvPrefix()} ${buildProotOptions(distro)}"
+    }
+
+    /**
      * Set up networking and apt inside the proot container.
      * Must be called before any apt operations.
      */
     private fun setupContainerNetworking(distro: String) {
         val rootfsDir = getRootfsDir(distro)
-        val bash = bashPath()
 
-        // 1. Create /etc/resolv.conf if DNS bind didn't work
+        // 1. Create /etc/resolv.conf
         val resolvConf = File(rootfsDir, "etc/resolv.conf")
         resolvConf.parentFile?.mkdirs()
         if (!resolvConf.exists() || resolvConf.readText().trim().isEmpty()) {
             try {
                 resolvConf.writeText(
-                    """# DroidForge DNS config
-nameserver 8.8.8.8
-nameserver 8.8.4.4
-nameserver 1.1.1.1
-"""
+                    "nameserver 8.8.8.8\nnameserver 8.8.4.4\nnameserver 1.1.1.1\n"
                 )
             } catch (_: Exception) {}
         }
@@ -123,67 +142,48 @@ nameserver 1.1.1.1
             when (distro) {
                 "ubuntu" -> {
                     sourcesList.writeText(
-                        """deb http://ports.ubuntu.com/ubuntu-ports/ noble main restricted universe multiverse
-deb http://ports.ubuntu.com/ubuntu-ports/ noble-updates main restricted universe multiverse
-deb http://ports.ubuntu.com/ubuntu-ports/ noble-security main restricted universe multiverse
-"""
+                        "deb http://ports.ubuntu.com/ubuntu-ports/ noble main restricted universe multiverse\n" +
+                        "deb http://ports.ubuntu.com/ubuntu-ports/ noble-updates main restricted universe multiverse\n" +
+                        "deb http://ports.ubuntu.com/ubuntu-ports/ noble-security main restricted universe multiverse\n"
                     )
                 }
                 "debian" -> {
                     sourcesList.writeText(
-                        """deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
-deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
-deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
-"""
+                        "deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\n" +
+                        "deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\n"
                     )
                 }
                 "kali-nethunter" -> {
                     sourcesList.writeText(
-                        """deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware
-"""
-                    )
-                }
-                "archlinux" -> {
-                    // Arch uses pacman, not apt — create a marker
-                    File(rootfsDir, "etc/pacman.d/mirrorlist").parentFile?.mkdirs()
-                    File(rootfsDir, "etc/pacman.d/mirrorlist").writeText(
-                        "Server = https://archlinux.org/\$repo/os/\$arch\n"
-                    )
-                }
-                "alpine" -> {
-                    val reposFile = File(rootfsDir, "etc/apk/repositories")
-                    reposFile.parentFile?.mkdirs()
-                    reposFile.writeText(
-                        "https://dl-cdn.alpinelinux.org/alpine/v3.20/main\nhttps://dl-cdn.alpinelinux.org/alpine/v3.20/community\n"
+                        "deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware\n"
                     )
                 }
             }
         }
 
-        // 3. Create /tmp with proper permissions for apt lock files
-        val tmpDir = File(rootfsDir, "tmp")
-        tmpDir.mkdirs()
-
-        // 4. Create /var/tmp for apt
-        val varTmpDir = File(rootfsDir, "var/tmp")
-        varTmpDir.mkdirs()
-
-        // 5. Create required dirs for dpkg
+        // 3. Create required dirs
+        File(rootfsDir, "tmp").mkdirs()
+        File(rootfsDir, "var/tmp").mkdirs()
         File(rootfsDir, "var/lib/dpkg").mkdirs()
         File(rootfsDir, "var/cache/apt/archives").mkdirs()
         File(rootfsDir, "var/lib/apt/lists/partial").mkdirs()
+        File(rootfsDir, "proc").mkdirs()
+        File(rootfsDir, "sys").mkdirs()
+        File(rootfsDir, "dev").mkdirs()
 
-        // 6. Ensure proper /etc/hostname
+        // 4. Ensure /etc/hostname and /etc/hosts
         val hostname = File(rootfsDir, "etc/hostname")
         hostname.parentFile?.mkdirs()
-        if (!hostname.exists()) {
-            hostname.writeText("droidforge\n")
-        }
+        if (!hostname.exists()) hostname.writeText("droidforge\n")
 
-        // 7. Ensure /etc/hosts
         val hosts = File(rootfsDir, "etc/hosts")
-        if (!hosts.exists()) {
-            hosts.writeText("127.0.0.1 localhost droidforge\n")
+        if (!hosts.exists()) hosts.writeText("127.0.0.1 localhost droidforge\n")
+
+        // 5. Ensure /etc/passwd for non-root user
+        val passwd = File(rootfsDir, "etc/passwd")
+        if (!passwd.exists()) {
+            passwd.parentFile?.mkdirs()
+            passwd.writeText("root:x:0:0:root:/root:/bin/sh\n")
         }
     }
 
@@ -192,7 +192,7 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
         if (prootDir.exists()) {
             prootDir.listFiles()?.forEach { dir ->
                 if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
-                    && dir.name != "backups") {
+                    && dir.name != "backups" && dir.name != "proot_tmp") {
                     return true
                 }
             }
@@ -212,13 +212,13 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 
     /**
      * Set up the bootstrap environment — extract bundled binaries.
-     * No longer requires Termux or network access for proot.
      */
     fun setupBootstrap(onProgress: (Double, String) -> Unit) {
         Thread {
             try {
                 onProgress(0.05, "Creating directories...")
                 prootDir.mkdirs()
+                prootTmpDir.mkdirs()
 
                 onProgress(0.2, "Extracting proot binaries...")
                 binaryManager.ensureBinaries()
@@ -228,9 +228,7 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 
                 onProgress(0.8, "Verifying installation...")
                 val proot = prootBinary()
-                val shell = bashPath()
                 onProgress(0.9, "Proot: $proot")
-                onProgress(0.95, "Shell: $shell")
 
                 onProgress(1.0, "Bootstrap complete!")
             } catch (e: Exception) {
@@ -241,7 +239,7 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 
     /**
      * Install a desktop environment inside the proot container.
-     * Runs apt install INSIDE the proot container (not pkg install from Termux).
+     * Uses /bin/sh as fallback if /bin/bash is missing from rootfs.
      */
     fun installDesktopEnvironment(
         de: String,
@@ -253,6 +251,8 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
         Thread {
             try {
                 val distro = detectInstalledDistro().ifEmpty { "ubuntu" }
+                val rootfsDir = getRootfsDir(distro)
+                val shell = rootfsShell(rootfsDir)
                 sendProgress(channel, 0.05, "Preparing $de ($type) installation...")
 
                 // Step 0: Set up container networking and apt sources
@@ -264,39 +264,35 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 
                 // Step 1: Update apt inside proot container
                 sendProgress(channel, 0.12, "Updating package lists (apt update)...")
-                val updateCmd = "$bash -c '$prootPrefix /bin/bash -c \"export DEBIAN_FRONTEND=noninteractive && apt update -y 2>&1 || echo APT_UPDATE_FAILED\"'"
+                val updateCmd = "$bash -c '${prootPrefix} $shell -c \"export DEBIAN_FRONTEND=noninteractive && apt update -y 2>&1 || echo APT_UPDATE_FAILED\"'"
                 val updateOutput = executeShellCommand(updateCmd)
                 if (updateOutput.contains("APT_UPDATE_FAILED") || updateOutput.contains("Err:") || updateOutput.contains("Could not resolve")) {
-                    // Try one more time with verbose output
                     sendProgress(channel, 0.15, "Retrying apt update...")
                     val retryOutput = executeShellCommand(
-                        "$bash -c '$prootPrefix /bin/bash -c \"apt update 2>&1 | tail -20\"'"
+                        "$bash -c '${prootPrefix} $shell -c \"apt update 2>&1 | tail -20\"'"
                     )
                     if (retryOutput.contains("Could not resolve") || retryOutput.contains("Err:")) {
-                        sendProgress(channel, -1.0, "apt update failed — no network access inside container. Check DNS resolution.")
+                        sendProgress(channel, -1.0, "apt update failed. Check DNS/network.")
                         return@Thread
                     }
                 }
                 sendProgress(channel, 0.2, "Package lists updated.")
 
-                // Step 2: Install DE packages inside proot container via apt
+                // Step 2: Install DE packages
                 val packages = getDEPackages(de, type)
                 sendProgress(channel, 0.22, "Installing $de packages (this may take a while)...")
-
-                // Run apt install with progress streaming
-                val aptCmd = "$bash -c '$prootPrefix /bin/bash -c \"export DEBIAN_FRONTEND=noninteractive && apt install -y --no-install-recommends $packages 2>&1 | tail -50\"'"
+                val aptCmd = "$bash -c '${prootPrefix} $shell -c \"export DEBIAN_FRONTEND=noninteractive && apt install -y --no-install-recommends $packages 2>&1 | tail -50\"'"
                 val aptOutput = executeLongCommand(aptCmd, channel, 0.22, 0.70)
 
-                // Check if apt install succeeded
                 if (aptOutput.contains("E: Unable to locate package") || aptOutput.contains("has no installation candidate")) {
                     val pkg = aptOutput.lines().firstOrNull { it.contains("Unable to locate package") } ?: "unknown"
-                    sendProgress(channel, -1.0, "Package not found: $pkg\nTry: apt update first, or check package names.")
+                    sendProgress(channel, -1.0, "Package not found: $pkg")
                     return@Thread
                 }
 
-                // Step 3: Install additional base tools inside proot
+                // Step 3: Install additional base tools
                 sendProgress(channel, 0.72, "Installing base tools (dbus, fonts, sudo)...")
-                val baseCmd = "$bash -c '$prootPrefix /bin/bash -c \"export DEBIAN_FRONTEND=noninteractive && apt install -y --no-install-recommends dbus-x11 fonts-liberation fonts-dejavu-core sudo wget curl 2>&1 | tail -20 || true\"'"
+                val baseCmd = "$bash -c '${prootPrefix} $shell -c \"export DEBIAN_FRONTEND=noninteractive && apt install -y --no-install-recommends dbus-x11 fonts-liberation fonts-dejavu-core sudo wget curl 2>&1 | tail -20 || true\"'"
                 executeLongCommand(baseCmd, channel, 0.72, 0.85)
 
                 // Step 4: Configure DE
@@ -305,16 +301,15 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 
                 // Step 5: Verify installation
                 sendProgress(channel, 0.90, "Verifying installation...")
-                val verifyCmd = buildProotExecPrefix(distro)
                 val verifyResult = executeShellCommand(
-                    "$bash -c '$verifyCmd /bin/bash -c \"which startxfce4 2>/dev/null || which startlxqt 2>/dev/null || which mate-session 2>/dev/null || echo NO_DE_FOUND\"'"
+                    "$bash -c '${buildProotExecPrefix(distro)} $shell -c \"which startxfce4 2>/dev/null || which startlxqt 2>/dev/null || which mate-session 2>/dev/null || echo NO_DE_FOUND\"'"
                 )
                 if (verifyResult.contains("NO_DE_FOUND")) {
-                    sendProgress(channel, -1.0, "DE binaries not found after install. Installation may have failed.")
+                    sendProgress(channel, -1.0, "DE binaries not found after install.")
                     return@Thread
                 }
 
-                // Step 6: Install GPU drivers inside proot
+                // Step 6: Install GPU drivers
                 sendProgress(channel, 0.93, "Installing GPU drivers...")
                 installGPUDriversInsideProot(distro)
 
@@ -328,12 +323,7 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
     /**
      * Start the Linux desktop session.
      */
-    fun startLinux(
-        de: String,
-        mode: String,
-        width: Int,
-        height: Int
-    ) {
+    fun startLinux(de: String, mode: String, width: Int, height: Int) {
         stopLinux()
 
         Thread {
@@ -352,9 +342,7 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
     /** Stop all running Linux sessions */
     fun stopLinux() {
         runningProcess?.let { process ->
-            try {
-                process.destroyForcibly()
-            } catch (_: Exception) {}
+            try { process.destroyForcibly() } catch (_: Exception) {}
         }
         runningProcess = null
 
@@ -419,36 +407,11 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 
     // ── Private Helpers ──
 
-    private fun buildStartCommand(
-        de: String,
-        mode: String,
-        width: Int,
-        height: Int
-    ): String {
-        val prootRoot = getRootfsDir().absolutePath
-        val proot = prootBinary()
-        val libPath = binaryManager.getLibPath()
-
-        val prootArgs = buildString {
-            // LD_LIBRARY_PATH on HOST side — proot binary itself needs libtalloc.so.2
-            append("LD_LIBRARY_PATH=$libPath ")
-            append(proot)
-            append(" -0")
-            append(" -w /root")
-            append(" --link2symlink")
-            append(" -b /dev")
-            append(" -b /proc")
-            append(" -b /sys")
-            append(" -b /dev/urandom:/dev/random")
-            val resolvConf = File("/etc/resolv.conf")
-            if (resolvConf.exists()) {
-                append(" -b /etc/resolv.conf")
-            }
-            val homeDir = context.getExternalFilesDir(null) ?: context.filesDir
-            append(" -b ${homeDir.absolutePath}:/home")
-            append(" -r $prootRoot")
-            append(" --kill-on-exit")
-        }
+    private fun buildStartCommand(de: String, mode: String, width: Int, height: Int): String {
+        val rootfsDir = getRootfsDir()
+        val shell = rootfsShell(rootfsDir)
+        val prootOpts = buildProotOptions()
+        val envPrefix = buildEnvPrefix()
 
         val deCommand = when (de) {
             "xfce4" -> "startxfce4"
@@ -460,13 +423,10 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 
         return when (mode) {
             "vnc" -> {
-                "$prootArgs /bin/bash -c 'export DISPLAY=:1 && export PULSE_SERVER=tcp:127.0.0.1:4713 && vncserver -geometry ${width}x${height} -depth 24 :1 && sleep infinity'"
-            }
-            "x11" -> {
-                "$prootArgs /bin/bash -c 'export DISPLAY=:0 && export PULSE_SERVER=tcp:127.0.0.1:4713 && $deCommand'"
+                "$envPrefix $prootOpts $shell -c 'export DISPLAY=:1 && export PULSE_SERVER=tcp:127.0.0.1:4713 && vncserver -geometry ${width}x${height} -depth 24 :1 && sleep infinity'"
             }
             else -> {
-                "$prootArgs /bin/bash -c 'export DISPLAY=:0 && export PULSE_SERVER=tcp:127.0.0.1:4713 && $deCommand'"
+                "$envPrefix $prootOpts $shell -c 'export DISPLAY=:0 && export PULSE_SERVER=tcp:127.0.0.1:4713 && $deCommand'"
             }
         }
     }
@@ -487,6 +447,7 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
 
     private fun configureDE(de: String, type: String) {
         val rootfsDir = getRootfsDir()
+        val shell = rootfsShell(rootfsDir)
         val configDir = File(rootfsDir, ".config")
         configDir.mkdirs()
 
@@ -503,10 +464,9 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
   </property>
 </channel>"""
                 )
-                // Create XFCE start script
                 val xinitrc = File(rootfsDir, "root/.xinitrc")
                 xinitrc.parentFile?.mkdirs()
-                xinitrc.writeText("#!/bin/bash\nexec startxfce4\n")
+                xinitrc.writeText("#!$shell\nexec startxfce4\n")
                 xinitrc.setExecutable(true)
             }
             "lxqt" -> {
@@ -520,74 +480,42 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
             }
         }
 
-        // Create a common start script for VNC
         val vncStart = File(rootfsDir, "usr/local/bin/start-vnc.sh")
         vncStart.parentFile?.mkdirs()
         vncStart.writeText(
-            """#!/bin/bash
-export DISPLAY=:1
-export PULSE_SERVER=tcp:127.0.0.1:4713
-vncserver -geometry 1920x1080 -depth 24 :1 2>/dev/null || true
-sleep infinity
-"""
+            "#!$shell\nexport DISPLAY=:1\nexport PULSE_SERVER=tcp:127.0.0.1:4713\nvncserver -geometry 1920x1080 -depth 24 :1 2>/dev/null || true\nsleep infinity\n"
         )
         vncStart.setExecutable(true)
     }
 
-    /**
-     * Install GPU drivers INSIDE the proot container via apt.
-     */
     private fun installGPUDriversInsideProot(distro: String) {
         val bash = bashPath()
+        val rootfsDir = getRootfsDir(distro)
+        val shell = rootfsShell(rootfsDir)
         val prootPrefix = buildProotExecPrefix(distro)
 
-        // Install mesa drivers inside proot — always install generic mesa as fallback
         try {
             executeShellCommand(
-                "$bash -c '$prootPrefix /bin/bash -c \"export DEBIAN_FRONTEND=noninteractive && apt install -y mesa-utils libgl1-mesa-dri libgl1-mesa-glx libegl1-mesa libgles2-mesa 2>&1 | tail -10 || true\"'"
+                "$bash -c '${prootPrefix} $shell -c \"export DEBIAN_FRONTEND=noninteractive && apt install -y mesa-utils libgl1-mesa-dri libgl1-mesa-glx libegl1-mesa libgles2-mesa 2>&1 | tail -10 || true\"'"
             )
-        } catch (_: Exception) {}
-
-        // Try specific GPU drivers (best-effort)
-        val gpuVendor = getGPUVendor()
-        try {
-            when {
-                gpuVendor.contains("adreno", ignoreCase = true) || gpuVendor.contains("qualcomm", ignoreCase = true) -> {
-                    executeShellCommand(
-                        "$bash -c '$prootPrefix /bin/bash -c \"export DEBIAN_FRONTEND=noninteractive && apt install -y mesa-vulkan-drivers 2>&1 | tail -5 || true\"'"
-                    )
-                }
-                gpuVendor.contains("mali", ignoreCase = true) -> {
-                    executeShellCommand(
-                        "$bash -c '$prootPrefix /bin/bash -c \"export DEBIAN_FRONTEND=noninteractive && apt install -y libmali-midgard-gbm 2>&1 | tail -5 || true\"'"
-                    )
-                }
-            }
         } catch (_: Exception) {}
     }
 
-    /**
-     * Detect GPU vendor using Android system properties (no shell needed).
-     */
     private fun getGPUVendor(): String {
         return try {
             val board = Build.BOARD?.lowercase() ?: ""
             val hardware = Build.HARDWARE?.lowercase() ?: ""
             val chipset = Build.SOC_MANUFACTURER?.lowercase() ?: ""
             val model = Build.MODEL?.lowercase() ?: ""
-
-            val combined = "$board $hardware $chipset $model"
-            combined
-        } catch (_: Exception) {
-            ""
-        }
+            "$board $hardware $chipset $model"
+        } catch (_: Exception) { "" }
     }
 
     private fun detectInstalledDistro(): String {
         if (prootDir.exists()) {
             prootDir.listFiles()?.forEach { dir ->
                 if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
-                    && dir.name != "backups") {
+                    && dir.name != "backups" && dir.name != "proot_tmp") {
                     return dir.name
                 }
             }
@@ -607,8 +535,7 @@ sleep infinity
         )
 
         for ((de, indicator) in checks) {
-            val file = File(rootfsDir, indicator)
-            if (file.exists()) return de
+            if (File(rootfsDir, indicator).exists()) return de
         }
         return ""
     }
@@ -629,8 +556,8 @@ sleep infinity
     }
 
     /**
-     * Execute a long-running command (like apt install) with streaming progress.
-     * Returns the last 50 lines of output for error checking.
+     * Execute a long-running command with streaming progress.
+     * Returns full output for error checking.
      */
     private fun executeLongCommand(
         command: String,
@@ -647,13 +574,8 @@ sleep infinity
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             val errorReader = BufferedReader(InputStreamReader(process.errorStream))
 
-            // Merge stderr into stdout for apt output
             Thread {
-                try {
-                    errorReader.forEachLine { line ->
-                        outputLines.add(line)
-                    }
-                } catch (_: Exception) {}
+                try { errorReader.forEachLine { line -> outputLines.add(line) } } catch (_: Exception) {}
             }.start()
 
             var lineCount = 0
@@ -661,14 +583,9 @@ sleep infinity
                 val line = reader.readLine() ?: break
                 outputLines.add(line)
                 lineCount++
-                // Send progress updates periodically
                 if (lineCount % 25 == 0) {
                     val progress = progressStart + (progressEnd - progressStart) * 0.8
-                    // Show meaningful apt output to user
-                    val meaningfulLine = line.trim()
-                        .removePrefix("[")
-                        .replace(Regex("^\\d+%" ), "")
-                        .trim()
+                    val meaningfulLine = line.trim().removePrefix("[").replace(Regex("^\\d+%"), "").trim()
                     if (meaningfulLine.isNotEmpty() && meaningfulLine.length > 3) {
                         sendProgress(channel, progress, "Installing... $meaningfulLine")
                     }
@@ -677,7 +594,6 @@ sleep infinity
 
             val exitCode = process.waitFor()
             if (exitCode != 0) {
-                // Include last 10 lines of output for debugging
                 val tail = outputLines.takeLast(10).joinToString("\n")
                 sendProgress(channel, -1.0, "Command failed (exit $exitCode):\n$tail")
             }
@@ -691,28 +607,15 @@ sleep infinity
 
     private fun writeBootstrapScript() {
         try {
-            bootstrapScript.writeText(
-                """#!/system/bin/sh
-# DroidForge Bootstrap Script
-echo "Setting up DroidForge environment..."
-echo "Bootstrap complete!"
-"""
-            )
+            bootstrapScript.writeText("#!/system/bin/sh\necho 'Bootstrap complete!'\n")
             bootstrapScript.setExecutable(true)
         } catch (_: Exception) {}
     }
 
-    private fun sendProgress(
-        channel: MethodChannel,
-        progress: Double,
-        status: String
-    ) {
+    private fun sendProgress(channel: MethodChannel, progress: Double, status: String) {
         mainHandler.post {
             try {
-                channel.invokeMethod(
-                    "onInstallProgress",
-                    mapOf("progress" to progress, "status" to status)
-                )
+                channel.invokeMethod("onInstallProgress", mapOf("progress" to progress, "status" to status))
             } catch (_: Exception) {}
         }
     }

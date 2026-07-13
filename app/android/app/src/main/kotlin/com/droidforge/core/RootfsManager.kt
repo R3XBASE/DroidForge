@@ -237,21 +237,18 @@ class RootfsManager(private val context: Context) {
 
                 sendProgress(channel, "onExtractProgress", 0.85, "Validating rootfs...")
 
+                // ALWAYS fix merged-usr layout — proot can't follow symlinks.
+                // Host OS follows symlinks so validation passes, but inside proot they break.
+                sendProgress(channel, "onExtractProgress", 0.87, "Fixing merged-usr layout...")
+                fixMergedUsr(rootfsDir)
+
                 // Validate: check if essential files exist
                 val validationFailed = validateRootfs(rootfsDir, distro)
                 if (validationFailed != null) {
-                    // Try to fix merged-usr layout
-                    sendProgress(channel, "onExtractProgress", 0.88, "Fixing merged-usr layout...")
-                    fixMergedUsr(rootfsDir)
-
-                    // Re-validate
-                    val recheck = validateRootfs(rootfsDir, distro)
-                    if (recheck != null) {
-                        sendProgress(channel, "onExtractProgress", -1.0,
-                            "Rootfs validation failed after fixup: $recheck\n" +
-                            "Extracted files: ${rootfsDir.listFiles()?.map { it.name }}")
-                        return@Thread
-                    }
+                    sendProgress(channel, "onExtractProgress", -1.0,
+                        "Rootfs validation failed after fixup: $validationFailed\n" +
+                        "Extracted files: ${rootfsDir.listFiles()?.map { it.name }}")
+                    return@Thread
                 }
 
                 sendProgress(channel, "onExtractProgress", 0.9, "Setting up environment...")
@@ -323,6 +320,7 @@ class RootfsManager(private val context: Context) {
      * like /bin → usr/bin, but proot cannot resolve them properly.
      *
      * This creates real /bin, /sbin, /lib directories and copies essential files.
+     * CRITICAL: /bin/sh MUST be a real file (dash), NOT a symlink.
      */
     private fun fixMergedUsr(rootfsDir: File) {
         val bash = bashPath()
@@ -343,6 +341,32 @@ class RootfsManager(private val context: Context) {
                 binDir.delete()
             }
             binDir.mkdirs()
+        }
+
+        // CRITICAL: Ensure /bin/sh is a real file (not symlink)
+        // proot can't follow symlinks to /usr/bin on Android FUSE
+        val binSh = File(binDir, "sh")
+        if (!binSh.exists() || binSh.length() == 0L) {
+            // Try multiple sources for sh
+            val shSources = listOf(
+                File(usrBinDir, "sh"),
+                File(rootfsDir, "usr/bin/dash"),
+                File(rootfsDir, "bin/dash")
+            )
+            for (src in shSources) {
+                if (src.exists() && src.length() > 0) {
+                    try {
+                        if (binSh.exists()) binSh.delete()
+                        src.copyTo(binSh)
+                        binSh.setExecutable(true)
+                    } catch (_: Exception) {}
+                    break
+                }
+            }
+        }
+        // Ensure sh is always executable
+        if (binSh.exists()) {
+            binSh.setExecutable(true)
         }
 
         // Copy essential binaries from /usr/bin to /bin
@@ -446,12 +470,13 @@ class RootfsManager(private val context: Context) {
             val hosts = File(rootfsDir, "etc/hosts")
             if (!hosts.exists()) hosts.writeText("127.0.0.1 localhost droidforge\n")
 
-            // Ensure /etc/passwd
+            // Force /etc/passwd to use /bin/sh (not /bin/bash)
+            // Ubuntu Base ships with /bin/bash in passwd but bash can't run on FUSE
             val passwd = File(rootfsDir, "etc/passwd")
-            if (!passwd.exists()) {
-                passwd.parentFile?.mkdirs()
+            passwd.parentFile?.mkdirs()
+            try {
                 passwd.writeText("root:x:0:0:root:/root:/bin/sh\n")
-            }
+            } catch (_: Exception) {}
 
             // Write distro-specific apt configuration
             val aptConf = File(rootfsDir, "etc/apt/sources.list")

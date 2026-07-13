@@ -41,13 +41,13 @@ class TerminalManager(private val context: Context) {
         return binaryManager.getProotPath()
     }
 
-    /** Find a working shell inside the rootfs */
+    /** Find a working shell inside the rootfs — prefer /bin/sh (dash, static) over bash */
     private fun rootfsShell(rootfsDir: File): String {
         val candidates = listOf(
-            "/bin/bash", "/usr/bin/bash",
             "/bin/sh", "/usr/bin/sh",
             "/bin/dash", "/usr/bin/dash",
-            "/bin/busybox", "/usr/bin/busybox"
+            "/bin/busybox", "/usr/bin/busybox",
+            "/bin/bash", "/usr/bin/bash"   // bash LAST — dynamic, often broken on FUSE
         )
         for (c in candidates) {
             val f = File(rootfsDir, c.substring(1))
@@ -59,6 +59,37 @@ class TerminalManager(private val context: Context) {
     private fun buildEnvPrefix(): String {
         val libPath = binaryManager.getLibPath()
         return "LD_LIBRARY_PATH=$libPath PROOT_TMP_DIR=${prootTmpDir.absolutePath}"
+    }
+
+    /**
+     * Quick fixup: ensure /bin/sh is a real file (not symlink) and /etc/passwd uses /bin/sh.
+     * Only runs if the rootfs has the merged-usr symlink issue.
+     */
+    private fun quickShellFixup(rootfsDir: File) {
+        // Fix /bin if it's a symlink (merged-usr)
+        val binDir = File(rootfsDir, "bin")
+        if (binDir.exists() && !binDir.isDirectory) {
+            val usrBinDir = File(rootfsDir, "usr/bin")
+            if (usrBinDir.exists()) {
+                binDir.delete()
+                binDir.mkdirs()
+                for (name in listOf("sh", "dash", "ls", "cat", "cp", "mv", "rm")) {
+                    val src = File(usrBinDir, name)
+                    val dst = File(binDir, name)
+                    if (src.exists() && !dst.exists()) {
+                        try { src.copyTo(dst); dst.setExecutable(true) } catch (_: Exception) {}
+                    }
+                }
+            }
+        }
+        // Ensure /bin/sh is executable
+        val binSh = File(rootfsDir, "bin/sh")
+        if (binSh.exists()) binSh.setExecutable(true)
+
+        // Fix /etc/passwd
+        val passwd = File(rootfsDir, "etc/passwd")
+        passwd.parentFile?.mkdirs()
+        try { passwd.writeText("root:x:0:0:root:/root:/bin/sh\n") } catch (_: Exception) {}
     }
 
     /**
@@ -80,6 +111,10 @@ class TerminalManager(private val context: Context) {
 
                 val isBootstrapped = distroDir.exists() && distroDir.listFiles()?.isNotEmpty() == true
                 val bash = bashPath()
+
+                // Quick fixup: ensure /bin/sh is real (not symlink) and passwd uses /bin/sh
+                quickShellFixup(distroDir)
+
                 val shell = rootfsShell(distroDir)
 
                 val process = if (isBootstrapped) {

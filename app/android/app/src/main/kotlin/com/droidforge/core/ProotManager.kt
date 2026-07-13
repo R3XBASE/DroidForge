@@ -57,20 +57,25 @@ class ProotManager(private val context: Context) {
 
     /**
      * Find a working shell inside the rootfs.
-     * Ubuntu cloudimg rootfs may not have /bin/bash, try /bin/sh first.
+     *
+     * CRITICAL: We MUST prefer /bin/sh (dash) over /bin/bash.
+     * - bash is dynamically-linked and needs ld-linux-aarch64.so.1 which proot
+     *   often can't resolve on Android FUSE → "Permission denied"
+     * - dash (/bin/sh) is statically-linked and always works
+     * - Ubuntu Base has dash at /usr/bin/dash, with /bin/sh as symlink/copy
      */
     private fun rootfsShell(rootfsDir: File): String {
+        // ALWAYS prefer /bin/sh first — dash is static, works everywhere
         val candidates = listOf(
-            "/bin/bash", "/usr/bin/bash",
             "/bin/sh", "/usr/bin/sh",
             "/bin/dash", "/usr/bin/dash",
-            "/bin/busybox", "/usr/bin/busybox"
+            "/bin/busybox", "/usr/bin/busybox",
+            "/bin/bash", "/usr/bin/bash"   // bash LAST — often broken on FUSE
         )
         for (c in candidates) {
             val f = File(rootfsDir, c.substring(1))
             if (f.exists() && f.length() > 0) return c
         }
-        // Last resort: return /bin/sh (RootfsManager fixMergedUsr should have created it)
         return "/bin/sh"
     }
 
@@ -125,11 +130,80 @@ class ProotManager(private val context: Context) {
     }
 
     /**
+     * Pre-flight rootfs fixup for rootfs extracted before fixMergedUsr was added.
+     * Fixes three critical issues:
+     * 1. /bin/sh may be a symlink (merged-usr) — proot can't follow it
+     * 2. /etc/passwd may have /bin/bash — bash can't run on FUSE
+     * 3. Shell binaries may not have execute permission
+     */
+    private fun preflightRootfsFixup(rootfsDir: File) {
+        // 1. Ensure /bin is a real directory (not symlink)
+        val binDir = File(rootfsDir, "bin")
+        if (binDir.exists() && !binDir.isDirectory) {
+            // /bin is a symlink (merged-usr) — replace with real dir
+            val usrBinDir = File(rootfsDir, "usr/bin")
+            if (usrBinDir.exists()) {
+                binDir.delete()
+                binDir.mkdirs()
+                // Copy essential binaries
+                for (name in listOf("sh", "dash", "ls", "cat", "cp", "mv", "rm", "mkdir",
+                    "chmod", "echo", "grep", "sed", "awk", "find", "env", "id", "whoami")) {
+                    val src = File(usrBinDir, name)
+                    val dst = File(binDir, name)
+                    if (src.exists() && !dst.exists()) {
+                        try {
+                            src.copyTo(dst)
+                            dst.setExecutable(true)
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
+        }
+
+        // 2. Ensure /bin/sh exists and is a real file (not symlink to bash)
+        val binSh = File(rootfsDir, "bin/sh")
+        if (!binSh.exists() || binSh.length() == 0L) {
+            val sources = listOf(
+                File(rootfsDir, "usr/bin/sh"),
+                File(rootfsDir, "usr/bin/dash"),
+                File(rootfsDir, "bin/dash")
+            )
+            for (src in sources) {
+                if (src.exists() && src.length() > 0) {
+                    try {
+                        binSh.parentFile?.mkdirs()
+                        binSh.delete()
+                        src.copyTo(binSh)
+                        binSh.setExecutable(true)
+                    } catch (_: Exception) {}
+                    break
+                }
+            }
+        }
+        // Force executable on /bin/sh
+        if (binSh.exists()) binSh.setExecutable(true)
+
+        // 3. Force /etc/passwd to use /bin/sh
+        val passwd = File(rootfsDir, "etc/passwd")
+        passwd.parentFile?.mkdirs()
+        try {
+            passwd.writeText("root:x:0:0:root:/root:/bin/sh\n")
+        } catch (_: Exception) {}
+    }
+
+    /**
      * Set up networking and apt inside the proot container.
      * Must be called before any apt operations.
      */
     private fun setupContainerNetworking(distro: String) {
+
+        // Force /etc/passwd to use /bin/sh (not /bin/bash)
         val rootfsDir = getRootfsDir(distro)
+        val passwd = File(rootfsDir, "etc/passwd")
+        passwd.parentFile?.mkdirs()
+        try {
+            passwd.writeText("root:x:0:0:root:/root:/bin/sh\n")
+        } catch (_: Exception) {}
 
         // 1. Create /etc/resolv.conf
         val resolvConf = File(rootfsDir, "etc/resolv.conf")
@@ -186,12 +260,15 @@ class ProotManager(private val context: Context) {
         val hosts = File(rootfsDir, "etc/hosts")
         if (!hosts.exists()) hosts.writeText("127.0.0.1 localhost droidforge\n")
 
-        // 5. Ensure /etc/passwd for non-root user
+        // 5. Force /etc/passwd to use /bin/sh (not /bin/bash)
+        // Ubuntu Base rootfs ships with /bin/bash in passwd, but bash isn't installed.
+        // proot reads this and fails with "execve: Permission denied".
         val passwd = File(rootfsDir, "etc/passwd")
-        if (!passwd.exists()) {
-            passwd.parentFile?.mkdirs()
+        passwd.parentFile?.mkdirs()
+        try {
+            // Always overwrite to ensure /bin/sh is the shell
             passwd.writeText("root:x:0:0:root:/root:/bin/sh\n")
-        }
+        } catch (_: Exception) {}
     }
 
     /** Check if the proot environment is bootstrapped and has a working rootfs */
@@ -266,10 +343,15 @@ class ProotManager(private val context: Context) {
             try {
                 val distro = detectInstalledDistro().ifEmpty { "ubuntu" }
                 val rootfsDir = getRootfsDir(distro)
-                val shell = rootfsShell(rootfsDir)
                 sendProgress(channel, 0.05, "Preparing $de ($type) installation...")
 
-                // Step 0: Set up container networking and apt sources
+                // Step 0: Pre-flight rootfs fixup (for rootfs extracted before fixMergedUsr)
+                sendProgress(channel, 0.06, "Checking rootfs compatibility...")
+                preflightRootfsFixup(rootfsDir)
+
+                val shell = rootfsShell(rootfsDir)
+
+                // Step 0b: Set up container networking and apt sources
                 sendProgress(channel, 0.08, "Configuring container networking...")
                 setupContainerNetworking(distro)
 

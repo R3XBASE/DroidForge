@@ -62,6 +62,8 @@ class TerminalManager(private val context: Context) {
                     val libPath = binaryManager.getLibPath()
                     val homeDir = context.getExternalFilesDir(null) ?: context.filesDir
                     val prootCmd = buildString {
+                        // LD_LIBRARY_PATH on HOST side — proot binary itself needs libtalloc.so.2
+                        append("LD_LIBRARY_PATH=$libPath ")
                         append(proot)
                         append(" -0")
                         append(" -w /root")
@@ -74,7 +76,6 @@ class TerminalManager(private val context: Context) {
                         append(" -b ${homeDir.absolutePath}:/home")
                         append(" -r ${distroDir.absolutePath}")
                         append(" --kill-on-exit")
-                        append(" --env LD_LIBRARY_PATH=$libPath")
                         append(" -- /bin/bash -c '$command 2>&1'")
                     }
                     Runtime.getRuntime().exec(

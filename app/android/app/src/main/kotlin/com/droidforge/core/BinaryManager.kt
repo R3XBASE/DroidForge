@@ -10,11 +10,14 @@ import java.io.FileOutputStream
  * Standalone APK has no Termux, so we bundle:
  *   - proot (container runtime)
  *   - proot-loader (seccomp filter loader)
- *   - libtalloc.so (proot dependency)
+ *   - libtalloc.so.2 (proot dependency)
  *   - libandroid-shmem.so (proot dependency)
  *
  * These are extracted to context.filesDir/bin/ on first launch,
  * chmod +x, and used by ProotManager.
+ *
+ * LD_LIBRARY_PATH must be set on the HOST side (not via proot --env)
+ * because the proot binary itself needs to link against these libs.
  */
 class BinaryManager(private val context: Context) {
 
@@ -24,18 +27,24 @@ class BinaryManager(private val context: Context) {
     private val assets = listOf(
         "proot",
         "proot-loader",
-        "libtalloc.so",
+        "libtalloc.so.2",
         "libandroid-shmem.so"
     )
 
     /**
      * Extract all bundled binaries to filesDir/bin/.
      * Skips if already extracted (checks version via marker file).
-     * Returns the path to the bin directory.
+     * Creates symlinks for library compatibility.
      */
     fun ensureBinaries(): File {
-        val marker = File(binDir, ".extracted")
+        val marker = File(binDir, ".extracted_v2")
         if (marker.exists()) return binDir
+
+        // Clean old extraction if marker is v1
+        val oldMarker = File(binDir, ".extracted")
+        if (oldMarker.exists()) {
+            binDir.listFiles()?.forEach { it.delete() }
+        }
 
         binDir.mkdirs()
 
@@ -54,6 +63,10 @@ class BinaryManager(private val context: Context) {
             }
         }
 
+        // Create symlinks for compatibility
+        createSymlink(File(binDir, "libtalloc.so"), File(binDir, "libtalloc.so.2"))
+        createSymlink(File(binDir, "libtalloc.so.2"), File(binDir, "libtalloc.so.2.4.3"))
+
         // Mark extraction complete
         marker.writeText("ok")
         return binDir
@@ -71,10 +84,22 @@ class BinaryManager(private val context: Context) {
         return File(binDir, "proot-loader").absolutePath
     }
 
-    /** Get LD_LIBRARY_PATH for proot dependencies */
+    /**
+     * Get LD_LIBRARY_PATH for proot HOST-SIDE dependencies.
+     * This MUST be set on the host shell, not via proot --env,
+     * because the proot binary itself needs these libraries to run.
+     */
     fun getLibPath(): String {
         ensureBinaries()
         return binDir.absolutePath
+    }
+
+    /**
+     * Get the LD_LIBRARY_PATH prefix string for shell commands.
+     * Usage: "$ldLibPath proot -0 ..."
+     */
+    fun getLdLibraryPathPrefix(): String {
+        return "LD_LIBRARY_PATH=${getLibPath()}"
     }
 
     /** Get full path to a binary or null if not found */
@@ -82,5 +107,23 @@ class BinaryManager(private val context: Context) {
         ensureBinaries()
         val f = File(binDir, name)
         return if (f.exists()) f.absolutePath else null
+    }
+
+    private fun createSymlink(link: File, target: File) {
+        try {
+            if (!link.exists() && target.exists()) {
+                link.parentFile?.mkdirs()
+                Runtime.getRuntime().exec(
+                    arrayOf("/system/bin/sh", "-c", "ln -sf '${target.name}' '${link.absolutePath}'")
+                ).waitFor()
+            }
+        } catch (_: Exception) {
+            // If symlink fails, just copy the file
+            try {
+                if (target.exists() && !link.exists()) {
+                    target.copyTo(link, overwrite = true)
+                }
+            } catch (_: Exception) {}
+        }
     }
 }

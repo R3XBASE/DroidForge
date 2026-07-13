@@ -65,10 +65,11 @@ class ProotManager(private val context: Context) {
         val rootfsDir = getRootfsDir(distro)
         val prootRoot = rootfsDir.absolutePath
         val proot = prootBinary()
-        val loader = binaryManager.getProotLoaderPath()
         val libPath = binaryManager.getLibPath()
 
         return buildString {
+            // LD_LIBRARY_PATH on HOST side — proot binary itself needs libtalloc.so.2
+            append("LD_LIBRARY_PATH=$libPath ")
             append(proot)
             append(" -0")
             append(" -w /root")
@@ -89,8 +90,6 @@ class ProotManager(private val context: Context) {
             // Root filesystem
             append(" -r $prootRoot")
             append(" --kill-on-exit")
-            // LD_LIBRARY_PATH for bundled libs
-            append(" --env LD_LIBRARY_PATH=$libPath")
             append(" --")
         }
     }
@@ -432,6 +431,8 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
         val libPath = binaryManager.getLibPath()
 
         val prootArgs = buildString {
+            // LD_LIBRARY_PATH on HOST side — proot binary itself needs libtalloc.so.2
+            append("LD_LIBRARY_PATH=$libPath ")
             append(proot)
             append(" -0")
             append(" -w /root")
@@ -448,7 +449,6 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
             append(" -b ${homeDir.absolutePath}:/home")
             append(" -r $prootRoot")
             append(" --kill-on-exit")
-            append(" --env LD_LIBRARY_PATH=$libPath")
             append(" --")
         }
 

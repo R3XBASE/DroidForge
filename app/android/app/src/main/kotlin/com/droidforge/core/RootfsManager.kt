@@ -425,18 +425,30 @@ class RootfsManager(private val context: Context) {
             }
         }
 
-        // Handle /lib → usr/lib (create symlinks for library dirs)
+        // Handle /lib → usr/lib (CRITICAL: proot needs ld-linux-aarch64.so.1)
+        // If /lib is a symlink, proot can't resolve the chain to find the dynamic linker.
+        // This causes execve("bash"): Permission denied.
         val libDir = File(rootfsDir, "lib")
         val usrLibDir = File(rootfsDir, "usr/lib")
-        if (usrLibDir.exists() && !libDir.exists()) {
-            try {
-                Runtime.getRuntime().exec(
-                    arrayOf(bash, "-c", "ln -sf usr/lib '${libDir.absolutePath}'")
-                ).waitFor()
-            } catch (_: Exception) {
-                // If symlink fails, create actual dir (won't have content but won't break)
-                libDir.mkdirs()
+        if (usrLibDir.exists() && (libDir.exists() && !libDir.isDirectory)) {
+            // /lib is a symlink (merged-usr) — replace with real dir + critical libs
+            libDir.delete()
+            libDir.mkdirs()
+            val archLibDir = File(rootfsDir, "usr/lib/aarch64-linux-gnu")
+            if (archLibDir.exists()) {
+                val targetArchDir = File(libDir, "aarch64-linux-gnu")
+                targetArchDir.mkdirs()
+                for (f in archLibDir.listFiles() ?: emptyArray()) {
+                    if (f.name.startsWith("ld-linux") || f.name.startsWith("libc.so")
+                        || f.name.startsWith("libm.so") || f.name.startsWith("libdl.so")
+                        || f.name.startsWith("libpthread")) {
+                        try { f.copyTo(File(targetArchDir, f.name)) } catch (_: Exception) {}
+                    }
+                }
             }
+        } else if (usrLibDir.exists() && !libDir.exists()) {
+            // /lib doesn't exist at all — create real dir
+            libDir.mkdirs()
         }
     }
 

@@ -62,8 +62,8 @@ class TerminalManager(private val context: Context) {
     }
 
     /**
-     * Quick fixup: ensure /bin/sh is a real file (not symlink) and /etc/passwd uses /bin/sh.
-     * Only runs if the rootfs has the merged-usr symlink issue.
+     * Quick fixup: ensure rootfs is compatible with proot.
+     * Handles merged-usr symlinks for /bin and /lib.
      */
     private fun quickShellFixup(rootfsDir: File) {
         // Fix /bin if it's a symlink (merged-usr)
@@ -73,7 +73,7 @@ class TerminalManager(private val context: Context) {
             if (usrBinDir.exists()) {
                 binDir.delete()
                 binDir.mkdirs()
-                for (name in listOf("sh", "dash", "ls", "cat", "cp", "mv", "rm")) {
+                for (name in listOf("sh", "dash", "bash", "ls", "cat", "cp", "mv", "rm")) {
                     val src = File(usrBinDir, name)
                     val dst = File(binDir, name)
                     if (src.exists() && !dst.exists()) {
@@ -85,6 +85,25 @@ class TerminalManager(private val context: Context) {
         // Ensure /bin/sh is executable
         val binSh = File(rootfsDir, "bin/sh")
         if (binSh.exists()) binSh.setExecutable(true)
+
+        // Fix /lib if it's a symlink (merged-usr — needed for ld-linux-aarch64.so.1)
+        val libDir = File(rootfsDir, "lib")
+        val usrLibDir = File(rootfsDir, "usr/lib")
+        if (libDir.exists() && !libDir.isDirectory && usrLibDir.exists()) {
+            libDir.delete()
+            libDir.mkdirs()
+            val archLibDir = File(rootfsDir, "usr/lib/aarch64-linux-gnu")
+            if (archLibDir.exists()) {
+                val targetArchDir = File(libDir, "aarch64-linux-gnu")
+                targetArchDir.mkdirs()
+                for (f in archLibDir.listFiles() ?: emptyArray()) {
+                    if (f.name.startsWith("ld-linux") || f.name.startsWith("libc.so")
+                        || f.name.startsWith("libm.so") || f.name.startsWith("libdl.so")) {
+                        try { f.copyTo(File(targetArchDir, f.name)) } catch (_: Exception) {}
+                    }
+                }
+            }
+        }
 
         // Fix /etc/passwd
         val passwd = File(rootfsDir, "etc/passwd")
@@ -120,20 +139,23 @@ class TerminalManager(private val context: Context) {
                 val process = if (isBootstrapped) {
                     val proot = prootBinary()
                     val libPath = binaryManager.getLibPath()
+                    val loaderPath = binaryManager.getProotLoaderPath()
                     val homeDir = context.getExternalFilesDir(null) ?: context.filesDir
                     val prootCmd = buildString {
-                        append("LD_LIBRARY_PATH=$libPath PROOT_TMP_DIR=${prootTmpDir.absolutePath} ")
-                        append(proot)
-                        append(" -0")
+                        append("LD_LIBRARY_PATH=$libPath PROOT_TMP_DIR=${prootTmpDir.absolutePath}")
+                        if (loaderPath.isNotEmpty()) append(" PROOT_LOADER=$loaderPath")
+                        append(" PROOT_NO_SECCOMP=1")
+                        append(" $proot")
+                        append(" --rootfs=${distroDir.absolutePath}")
                         append(" -w /root")
                         append(" --link2symlink")
-                        append(" -b /dev")
-                        append(" -b /proc")
-                        append(" -b /sys")
-                        append(" -b /dev/urandom:/dev/random")
-                        append(" -b ${distroDir.absolutePath}/:/root")
-                        append(" -b ${homeDir.absolutePath}:/home")
-                        append(" -r ${distroDir.absolutePath}")
+                        append(" --sysvipc")
+                        append(" --bind=/dev")
+                        append(" --bind=/proc")
+                        append(" --bind=/sys")
+                        append(" --bind=${prootTmpDir.absolutePath}:/tmp")
+                        append(" --bind=${homeDir.absolutePath}:/home")
+                        append(" --root-id")
                         append(" --kill-on-exit")
                         // NO '--' — proot v5.1.0 doesn't support it
                         append(" $shell -c '$command 2>&1'")

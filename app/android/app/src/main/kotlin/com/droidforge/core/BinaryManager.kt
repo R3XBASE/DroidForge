@@ -67,6 +67,13 @@ class BinaryManager(private val context: Context) {
         createSymlink(File(binDir, "libtalloc.so"), File(binDir, "libtalloc.so.2"))
         createSymlink(File(binDir, "libtalloc.so.2"), File(binDir, "libtalloc.so.2.4.3"))
 
+        // proot-loader must have .so extension for proot's dlopen() in PROOT_LOADER
+        val loader = File(binDir, "proot-loader")
+        val loaderSo = File(binDir, "libproot-loader.so")
+        if (loader.exists() && !loaderSo.exists()) {
+            try { loader.copyTo(loaderSo) } catch (_: Exception) {}
+        }
+
         // Mark extraction complete
         marker.writeText("ok")
         return binDir
@@ -78,9 +85,12 @@ class BinaryManager(private val context: Context) {
         return File(binDir, "proot").absolutePath
     }
 
-    /** Get full path to the proot-loader */
+    /** Get full path to the proot-loader (.so for dlopen) */
     fun getProotLoaderPath(): String {
         ensureBinaries()
+        // Prefer .so version for PROOT_LOADER dlopen
+        val soFile = File(binDir, "libproot-loader.so")
+        if (soFile.exists()) return soFile.absolutePath
         return File(binDir, "proot-loader").absolutePath
     }
 

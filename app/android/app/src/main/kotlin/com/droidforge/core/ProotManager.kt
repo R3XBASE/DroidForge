@@ -80,17 +80,38 @@ class ProotManager(private val context: Context) {
     }
 
     /**
-     * Build environment prefix: LD_LIBRARY_PATH + PROOT_TMP_DIR
-     * These MUST be set on the HOST side (shell env vars, not proot --env).
+     * Build environment prefix: HOST-side env vars for proot.
+     * These MUST be set as shell env vars, not via proot --env.
+     *
+     * Critical vars (from DroidDesk):
+     * - LD_LIBRARY_PATH: proot binary needs libtalloc.so.2 etc on host
+     * - PROOT_TMP_DIR: Android /tmp not writable
+     * - PROOT_LOADER: trampoline .so for dynamic linker fallback (merged-usr fix)
+     * - PROOT_NO_SECCOMP=1: disables seccomp sandbox (Permission denied fix)
      */
     private fun buildEnvPrefix(): String {
         val libPath = binaryManager.getLibPath()
-        return "LD_LIBRARY_PATH=$libPath PROOT_TMP_DIR=${prootTmpDir.absolutePath}"
+        // proot-loader must be a .so file for proot to dlopen it
+        val loaderPath = binaryManager.getProotLoaderPath()
+        return buildString {
+            append("LD_LIBRARY_PATH=$libPath")
+            append(" PROOT_TMP_DIR=${prootTmpDir.absolutePath}")
+            if (loaderPath.isNotEmpty()) {
+                append(" PROOT_LOADER=$loaderPath")
+            }
+            append(" PROOT_NO_SECCOMP=1")
+        }
     }
 
     /**
      * Build proot options prefix (everything before the command to execute).
-     * NOTE: proot v5.1.0 does NOT support '--' separator.
+     *
+     * Based on DroidDesk's approach (LinuxRuntime.kt):
+     * - Uses --root-id instead of -0 (fake root, works on non-rooted Android)
+     * - Uses --link2symlink (handles hard link limitations)
+     * - Uses --sysvipc (shared memory for Chromium/LibreOffice)
+     * - Binds /tmp to writable dir
+     * - NOTE: proot v5.1.0 does NOT support '--' separator.
      */
     private fun buildProotOptions(distro: String? = null): String {
         val rootfsDir = getRootfsDir(distro)
@@ -100,23 +121,25 @@ class ProotManager(private val context: Context) {
 
         return buildString {
             append(proot)
-            append(" -0")
+            append(" --rootfs=$prootRoot")
             append(" -w /root")
             append(" --link2symlink")
+            append(" --sysvipc")
             // Standard namespace binds
-            append(" -b /dev")
-            append(" -b /proc")
-            append(" -b /sys")
-            append(" -b /dev/urandom:/dev/random")
+            append(" --bind=/dev")
+            append(" --bind=/proc")
+            append(" --bind=/sys")
+            // Writable /tmp inside container
+            append(" --bind=${prootTmpDir.absolutePath}:/tmp")
             // DNS resolution
             val resolvConf = File("/etc/resolv.conf")
             if (resolvConf.exists()) {
-                append(" -b /etc/resolv.conf")
+                append(" --bind=/etc/resolv.conf")
             }
             // Home directory
-            append(" -b ${homeDir.absolutePath}:/home")
-            // Root filesystem
-            append(" -r $prootRoot")
+            append(" --bind=${homeDir.absolutePath}:/home")
+            // Root ID (fake root, no real setuid needed)
+            append(" --root-id")
             append(" --kill-on-exit")
         }
     }
@@ -131,36 +154,75 @@ class ProotManager(private val context: Context) {
 
     /**
      * Pre-flight rootfs fixup for rootfs extracted before fixMergedUsr was added.
-     * Fixes three critical issues:
-     * 1. /bin/sh may be a symlink (merged-usr) — proot can't follow it
-     * 2. /etc/passwd may have /bin/bash — bash can't run on FUSE
-     * 3. Shell binaries may not have execute permission
+     * Fixes critical merged-usr issues for proot:
+     * 1. /bin may be symlink → proot can't follow → replace with real dir
+     * 2. /lib may be symlink → proot can't find ld-linux-aarch64.so.1
+     *    → execve("bash") fails with "Permission denied"
+     * 3. /etc/passwd may have /bin/bash → bash can't run on FUSE
+     * 4. Shell binaries may not have execute permission
      */
     private fun preflightRootfsFixup(rootfsDir: File) {
-        // 1. Ensure /bin is a real directory (not symlink)
+        // 1. Fix /bin (merged-usr symlink → real dir with binaries)
         val binDir = File(rootfsDir, "bin")
-        if (binDir.exists() && !binDir.isDirectory) {
-            // /bin is a symlink (merged-usr) — replace with real dir
-            val usrBinDir = File(rootfsDir, "usr/bin")
-            if (usrBinDir.exists()) {
-                binDir.delete()
-                binDir.mkdirs()
-                // Copy essential binaries
-                for (name in listOf("sh", "dash", "ls", "cat", "cp", "mv", "rm", "mkdir",
-                    "chmod", "echo", "grep", "sed", "awk", "find", "env", "id", "whoami")) {
-                    val src = File(usrBinDir, name)
-                    val dst = File(binDir, name)
-                    if (src.exists() && !dst.exists()) {
-                        try {
-                            src.copyTo(dst)
-                            dst.setExecutable(true)
-                        } catch (_: Exception) {}
-                    }
+        val usrBinDir = File(rootfsDir, "usr/bin")
+        if (binDir.exists() && !binDir.isDirectory && usrBinDir.exists()) {
+            binDir.delete()
+            binDir.mkdirs()
+            for (name in listOf("sh", "dash", "bash", "ls", "cat", "cp", "mv", "rm", "mkdir",
+                "chmod", "echo", "grep", "sed", "awk", "find", "env", "id", "whoami")) {
+                val src = File(usrBinDir, name)
+                val dst = File(binDir, name)
+                if (src.exists() && !dst.exists()) {
+                    try { src.copyTo(dst); dst.setExecutable(true) } catch (_: Exception) {}
                 }
             }
         }
 
-        // 2. Ensure /bin/sh exists and is a real file (not symlink to bash)
+        // 2. Fix /lib (merged-usr symlink → critical for ld-linux-aarch64.so.1)
+        // Ubuntu 24.04: /lib → usr/lib symlink. proot can't resolve the chain to find
+        // ld-linux-aarch64.so.1 → execve("bash"): Permission denied.
+        // PROOT_LOADER is the primary fix, but we also fix /lib for reliability.
+        val libDir = File(rootfsDir, "lib")
+        val usrLibDir = File(rootfsDir, "usr/lib")
+        if (usrLibDir.exists() && libDir.exists() && !libDir.isDirectory) {
+            // /lib is a symlink — replace with real dir + critical linker libs
+            libDir.delete()
+            libDir.mkdirs()
+            // Copy critical arch-specific libs from /usr/lib/aarch64-linux-gnu/
+            val archLibDir = File(rootfsDir, "usr/lib/aarch64-linux-gnu")
+            if (archLibDir.exists()) {
+                val targetArchDir = File(libDir, "aarch64-linux-gnu")
+                targetArchDir.mkdirs()
+                for (f in archLibDir.listFiles() ?: emptyArray()) {
+                    // Copy dynamic linker + core libs that bash/apt need
+                    if (f.name.startsWith("ld-linux") || f.name.startsWith("libc.so")
+                        || f.name.startsWith("libm.so") || f.name.startsWith("libdl.so")
+                        || f.name.startsWith("libpthread") || f.name.startsWith("librt.so")
+                        || f.name.startsWith("libresolv.so") || f.name.startsWith("libgcc_s.so")) {
+                        val dst = File(targetArchDir, f.name)
+                        if (!dst.exists()) {
+                            try { f.copyTo(dst) } catch (_: Exception) {}
+                        }
+                    }
+                }
+            }
+            // Also copy non-arch-specific libs (e.g. libcrypt, libutil)
+            for (f in usrLibDir.listFiles() ?: emptyArray()) {
+                if (f.isFile && (f.name.startsWith("libcrypt.so") || f.name.startsWith("libutil.so"))) {
+                    try { f.copyTo(File(libDir, f.name)) } catch (_: Exception) {}
+                }
+            }
+        }
+
+        // 3. Also fix /sbin if it's a symlink
+        val sbinDir = File(rootfsDir, "sbin")
+        val usrSbinDir = File(rootfsDir, "usr/sbin")
+        if (sbinDir.exists() && !sbinDir.isDirectory && usrSbinDir.exists()) {
+            sbinDir.delete()
+            sbinDir.mkdirs()
+        }
+
+        // 4. Ensure /bin/sh exists and is a real file
         val binSh = File(rootfsDir, "bin/sh")
         if (!binSh.exists() || binSh.length() == 0L) {
             val sources = listOf(
@@ -170,25 +232,17 @@ class ProotManager(private val context: Context) {
             )
             for (src in sources) {
                 if (src.exists() && src.length() > 0) {
-                    try {
-                        binSh.parentFile?.mkdirs()
-                        binSh.delete()
-                        src.copyTo(binSh)
-                        binSh.setExecutable(true)
-                    } catch (_: Exception) {}
+                    try { binSh.parentFile?.mkdirs(); binSh.delete(); src.copyTo(binSh); binSh.setExecutable(true) } catch (_: Exception) {}
                     break
                 }
             }
         }
-        // Force executable on /bin/sh
         if (binSh.exists()) binSh.setExecutable(true)
 
-        // 3. Force /etc/passwd to use /bin/sh
+        // 5. Force /etc/passwd to use /bin/sh
         val passwd = File(rootfsDir, "etc/passwd")
         passwd.parentFile?.mkdirs()
-        try {
-            passwd.writeText("root:x:0:0:root:/root:/bin/sh\n")
-        } catch (_: Exception) {}
+        try { passwd.writeText("root:x:0:0:root:/root:/bin/sh\n") } catch (_: Exception) {}
     }
 
     /**

@@ -90,7 +90,6 @@ class ProotManager(private val context: Context) {
             // Root filesystem
             append(" -r $prootRoot")
             append(" --kill-on-exit")
-            append(" --")
         }
     }
 
@@ -449,7 +448,6 @@ deb http://security.debian.org/debian-security bookworm-security main contrib no
             append(" -b ${homeDir.absolutePath}:/home")
             append(" -r $prootRoot")
             append(" --kill-on-exit")
-            append(" --")
         }
 
         val deCommand = when (de) {

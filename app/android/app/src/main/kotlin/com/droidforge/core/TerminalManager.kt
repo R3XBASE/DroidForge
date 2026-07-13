@@ -1,9 +1,12 @@
 package com.droidforge.core
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 
 /**
@@ -14,6 +17,13 @@ import java.io.InputStreamReader
 class TerminalManager(private val context: Context) {
 
     private var currentProcess: Process? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Resolve the bash path — try Termux first, fall back to system sh */
+    private fun bashPath(): String {
+        val termuxBash = File("/data/data/com.termux/files/usr/bin/bash")
+        return if (termuxBash.exists()) termuxBash.absolutePath else "/system/bin/sh"
+    }
 
     /**
      * Execute a shell command and stream output back to Flutter.
@@ -27,8 +37,15 @@ class TerminalManager(private val context: Context) {
 
         Thread {
             try {
-                val prootDir = context.filesDir.resolve("proot/ubuntu")
-                val isBootstrapped = prootDir.exists() && prootDir.listFiles()?.isNotEmpty() == true
+                val prootDir = context.filesDir.resolve("proot")
+                // Find first installed distro directory
+                val distroDir = prootDir.listFiles()?.firstOrNull {
+                    it.isDirectory && it.listFiles()?.isNotEmpty() == true
+                        && it.name != "backups"
+                } ?: File(prootDir, "ubuntu")
+
+                val isBootstrapped = distroDir.exists() && distroDir.listFiles()?.isNotEmpty() == true
+                val bash = bashPath()
 
                 val process = if (isBootstrapped) {
                     // Run command inside proot
@@ -41,22 +58,19 @@ class TerminalManager(private val context: Context) {
                         append(" -b /proc")
                         append(" -b /sys")
                         append(" -b /dev/urandom:/dev/random")
-                        append(" -b ${prootDir.absolutePath}/:/root")
+                        append(" -b ${distroDir.absolutePath}/:/root")
                         append(" -b /data/data/com.termux/files/home:/home")
-                        append(" -r ${prootDir.absolutePath}")
+                        append(" -r ${distroDir.absolutePath}")
                         append(" --kill-on-exit")
                         append(" -- /bin/bash -c '$command 2>&1'")
                     }
                     Runtime.getRuntime().exec(
-                        arrayOf("/data/data/com.termux/files/usr/bin/bash", "-c", prootCmd)
+                        arrayOf(bash, "-c", prootCmd)
                     )
                 } else {
-                    // Run command in Termux shell
+                    // Run command in shell
                     Runtime.getRuntime().exec(
-                        arrayOf(
-                            "/data/data/com.termux/files/usr/bin/bash", "-c",
-                            "$command 2>&1"
-                        )
+                        arrayOf(bash, "-c", "$command 2>&1")
                     )
                 }
 
@@ -120,11 +134,14 @@ class TerminalManager(private val context: Context) {
     }
 
     private fun sendTerminalOutput(channel: MethodChannel, text: String) {
-        try {
-            channel.invokeMethod(
-                "onTerminalOutput",
-                mapOf("text" to text)
-            )
-        } catch (_: Exception) {}
+        // Marshal to main thread for safety
+        mainHandler.post {
+            try {
+                channel.invokeMethod(
+                    "onTerminalOutput",
+                    mapOf("text" to text)
+                )
+            } catch (_: Exception) {}
+        }
     }
 }

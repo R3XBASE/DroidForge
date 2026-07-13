@@ -1,6 +1,8 @@
 package com.droidforge.core
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -22,6 +24,9 @@ class MainActivity : FlutterActivity() {
     private lateinit var terminalManager: TerminalManager
     private lateinit var vncManager: VncManager
 
+    private var cachedChannel: MethodChannel? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
@@ -30,13 +35,10 @@ class MainActivity : FlutterActivity() {
         terminalManager = TerminalManager(this)
         vncManager = VncManager(this)
 
-        MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            CHANNEL
-        ).setMethodCallHandler { call, result ->
-            // All calls dispatched to managers
-            val channel = flutterEngine.dartExecutor.binaryMessenger
+        val messenger = flutterEngine.dartExecutor.binaryMessenger
+        cachedChannel = MethodChannel(messenger, CHANNEL)
 
+        cachedChannel!!.setMethodCallHandler { call, result ->
             when (call.method) {
                 // ── Device Info ──
                 "getDeviceInfo" -> {
@@ -55,7 +57,7 @@ class MainActivity : FlutterActivity() {
                 // ── Bootstrap ──
                 "setupBootstrap" -> {
                     prootManager.setupBootstrap { progress, status ->
-                        sendToFlutter(channel, "onInstallProgress", progress, status)
+                        sendToFlutter("onInstallProgress", progress, status)
                     }
                     result.success(null)
                 }
@@ -63,11 +65,13 @@ class MainActivity : FlutterActivity() {
                 // ── Rootfs ──
                 "downloadRootfs" -> {
                     val distro = call.argument<String>("distro") ?: "ubuntu"
-                    rootfsManager.downloadRootfs(distro, channel)
+                    rootfsManager.downloadRootfs(distro, messenger)
                     result.success(null)
                 }
                 "extractRootfs" -> {
-                    rootfsManager.extractRootfs(channel)
+                    // Use current selected distro from state
+                    val distro = call.argument<String>("distro") ?: "ubuntu"
+                    rootfsManager.extractRootfs(distro, messenger)
                     result.success(null)
                 }
 
@@ -75,7 +79,7 @@ class MainActivity : FlutterActivity() {
                 "installDesktopEnvironment" -> {
                     val de = call.argument<String>("de") ?: "xfce4"
                     val type = call.argument<String>("type") ?: "minimal"
-                    prootManager.installDesktopEnvironment(de, type, channel)
+                    prootManager.installDesktopEnvironment(de, type, messenger)
                     result.success(null)
                 }
 
@@ -100,7 +104,7 @@ class MainActivity : FlutterActivity() {
                 // ── Terminal ──
                 "executeCommand" -> {
                     val command = call.argument<String>("command") ?: ""
-                    terminalManager.executeCommand(command, channel)
+                    terminalManager.executeCommand(command, messenger)
                     result.success(null)
                 }
                 "interruptCommand" -> {
@@ -133,17 +137,23 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /** Send a callback from Kotlin → Flutter */
+    /**
+     * Send a callback from Kotlin → Flutter.
+     * Thread-safe: always posts to main thread using cached MethodChannel.
+     */
     private fun sendToFlutter(
-        messenger: io.flutter.plugin.common.BinaryMessenger,
         method: String,
         progress: Double,
         status: String
     ) {
-        MethodChannel(messenger, CHANNEL).invokeMethod(
-            method,
-            mapOf("progress" to progress, "status" to status)
-        )
+        mainHandler.post {
+            try {
+                cachedChannel?.invokeMethod(
+                    method,
+                    mapOf("progress" to progress, "status" to status)
+                )
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onDestroy() {

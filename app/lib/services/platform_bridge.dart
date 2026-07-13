@@ -72,8 +72,8 @@ class DroidDeskPlatform {
     await _channel.invokeMethod('downloadRootfs', {'distro': distro});
   }
 
-  static Future<void> extractRootfs() async {
-    await _channel.invokeMethod('extractRootfs');
+  static Future<void> extractRootfs(String distro) async {
+    await _channel.invokeMethod('extractRootfs', {'distro': distro});
   }
 
   static Future<void> installDesktopEnvironment(

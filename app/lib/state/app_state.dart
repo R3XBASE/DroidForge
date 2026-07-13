@@ -258,7 +258,7 @@ class AppState extends ChangeNotifier {
       _extractProgress = 0.0;
       _errorMessage = null;
       notifyListeners();
-      await DroidDeskPlatform.extractRootfs();
+      await DroidDeskPlatform.extractRootfs(_selectedDistro);
     } catch (e) {
       _errorMessage = 'Extraction failed: $e';
       _isExtracting = false;

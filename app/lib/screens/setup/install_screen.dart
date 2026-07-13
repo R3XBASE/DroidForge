@@ -15,26 +15,37 @@ class InstallScreen extends StatefulWidget {
 }
 
 class _InstallScreenState extends State<InstallScreen> {
+  bool _setupTriggered = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<AppState>().runSetup();
+      if (!_setupTriggered && mounted) {
+        _setupTriggered = true;
+        context.read<AppState>().runSetup();
+      }
     });
+  }
+
+  void _navigateToHome() {
+    if (!mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const HomeScreen()),
+      (_) => false,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
 
-    // Auto-navigate when setup is complete
+    // Listen for setup completion via listener (NOT in build)
     if (state.isSetupComplete && !state.isDownloading && !state.isExtracting) {
+      // Use addPostFrameCallback to navigate OUTSIDE the build phase
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        Navigator.pushAndRemoveUntil(
-          context,
-          MaterialPageRoute(builder: (_) => const HomeScreen()),
-          (_) => false,
-        );
+        _navigateToHome();
       });
     }
 
@@ -47,7 +58,9 @@ class _InstallScreenState extends State<InstallScreen> {
     final statusText = state.isDownloading
         ? state.downloadStatus
         : state.isExtracting
-            ? (state.extractStatus.isNotEmpty ? state.extractStatus : state.statusMessage ?? 'Processing...')
+            ? (state.extractStatus.isNotEmpty
+                ? state.extractStatus
+                : state.statusMessage ?? 'Processing...')
             : 'Preparing...';
 
     return Scaffold(
@@ -113,18 +126,21 @@ class _InstallScreenState extends State<InstallScreen> {
                     decoration: BoxDecoration(
                       color: DroidTheme.error.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(DroidTheme.radiusMd),
-                      border: Border.all(color: DroidTheme.error.withValues(alpha: 0.3)),
+                      border: Border.all(
+                          color: DroidTheme.error.withValues(alpha: 0.3)),
                     ),
                     child: Column(
                       children: [
                         Row(
                           children: [
-                            const Icon(Icons.error_outline, color: DroidTheme.error, size: 20),
+                            const Icon(Icons.error_outline,
+                                color: DroidTheme.error, size: 20),
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
                                 state.errorMessage!,
-                                style: DroidTheme.bodyMd.copyWith(color: DroidTheme.error),
+                                style: DroidTheme.bodyMd
+                                    .copyWith(color: DroidTheme.error),
                               ),
                             ),
                           ],
@@ -136,7 +152,9 @@ class _InstallScreenState extends State<InstallScreen> {
                               child: OutlinedButton(
                                 onPressed: () {
                                   state.clearError();
+                                  _setupTriggered = false;
                                   state.runSetup();
+                                  _setupTriggered = true;
                                 },
                                 child: const Text('Retry'),
                               ),
@@ -161,7 +179,8 @@ class _InstallScreenState extends State<InstallScreen> {
                     child: LinearProgressIndicator(
                       value: progress.clamp(0.0, 1.0),
                       backgroundColor: DroidTheme.surfaceBorder,
-                      valueColor: const AlwaysStoppedAnimation(DroidTheme.primary),
+                      valueColor:
+                          const AlwaysStoppedAnimation(DroidTheme.primary),
                       minHeight: 4,
                     ),
                   ),

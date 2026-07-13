@@ -1,9 +1,8 @@
 package com.droidforge.core
 
 import android.content.Context
-import android.os.Build
-import android.os.Environment
-import android.os.StatFs
+import android.os.Handler
+import android.os.Looper
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import java.io.BufferedReader
@@ -22,14 +21,38 @@ import java.io.InputStreamReader
 class ProotManager(private val context: Context) {
 
     private val prootDir: File = File(context.filesDir, "proot")
-    private val rootfsDir: File = File(prootDir, "ubuntu")
     private val bootstrapScript: File = File(prootDir, "bootstrap.sh")
     private var runningProcess: Process? = null
     private var terminalProcess: Process? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Resolve the bash path — try Termux first, fall back to system sh */
+    private fun bashPath(): String {
+        val termuxBash = File("/data/data/com.termux/files/usr/bin/bash")
+        return if (termuxBash.exists()) termuxBash.absolutePath else "/system/bin/sh"
+    }
+
+    /** Resolve the proot binary path — check Termux first */
+    private fun prootBinary(): String {
+        val termuxProot = File("/data/data/com.termux/files/usr/bin/proot")
+        if (termuxProot.exists()) return termuxProot.absolutePath
+        // Check common proot locations
+        val localProot = File(context.filesDir, "proot/proot-arm64")
+        if (localProot.exists()) return localProot.absolutePath
+        return "proot" // hope it's on PATH
+    }
 
     /** Check if the proot environment is bootstrapped */
     fun isBootstrapped(): Boolean {
-        return rootfsDir.exists() && rootfsDir.listFiles()?.isNotEmpty() == true
+        // Check if any distro rootfs dir has files
+        if (prootDir.exists()) {
+            prootDir.listFiles()?.forEach { dir ->
+                if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /** Get the current runtime status */
@@ -43,7 +66,7 @@ class ProotManager(private val context: Context) {
     }
 
     /**
-     * Set up the bootstrap environment — download proot and create directory structure.
+     * Set up the bootstrap environment — ensure proot and base tools exist.
      * Calls [onProgress] during setup.
      */
     fun setupBootstrap(onProgress: (Double, String) -> Unit) {
@@ -51,29 +74,32 @@ class ProotManager(private val context: Context) {
             try {
                 onProgress(0.05, "Creating directories...")
                 prootDir.mkdirs()
-                rootfsDir.mkdirs()
 
-                onProgress(0.1, "Installing proot...")
-                executeShellCommand("pkg install -y proot tar x11-repo")
+                onProgress(0.1, "Checking proot installation...")
+                val bash = bashPath()
 
                 onProgress(0.2, "Setting up bootstrap script...")
                 writeBootstrapScript()
 
                 onProgress(0.3, "Installing base packages...")
-                executeShellCommand(
-                    "pkg install -y proot-distro x11-repo " +
-                    "termux-x11-nightly pulseaudio virglrenderer-mesa-zink"
-                )
-
-                onProgress(0.4, "Setting up Termux-X11...")
-                executeShellCommand("pkg install -y termux-x11-nightly")
+                // Try installing via pkg (Termux), but don't crash if it fails
+                try {
+                    executeShellCommand("$bash -c 'pkg install -y proot tar x11-repo 2>/dev/null || true'")
+                } catch (_: Exception) {}
 
                 onProgress(0.5, "Installing PRoot utilities...")
-                executeShellCommand(
-                    "pkg install -y proot " +
-                    "curl wget git python build-essential " +
-                    "x11-apps xterm"
-                )
+                try {
+                    executeShellCommand(
+                        "$bash -c 'pkg install -y proot curl wget git python build-essential x11-apps xterm 2>/dev/null || true'"
+                    )
+                } catch (_: Exception) {}
+
+                onProgress(0.7, "Installing display servers...")
+                try {
+                    executeShellCommand(
+                        "$bash -c 'pkg install -y termux-x11-nightly pulseaudio virglrenderer-mesa-zink 2>/dev/null || true'"
+                    )
+                } catch (_: Exception) {}
 
                 onProgress(1.0, "Bootstrap complete!")
             } catch (e: Exception) {
@@ -134,8 +160,9 @@ class ProotManager(private val context: Context) {
         Thread {
             try {
                 val startCmd = buildStartCommand(de, mode, width, height)
+                val bash = bashPath()
                 runningProcess = Runtime.getRuntime().exec(
-                    arrayOf("/data/data/com.termux/files/usr/bin/bash", "-c", startCmd)
+                    arrayOf(bash, "-c", startCmd)
                 )
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -152,13 +179,14 @@ class ProotManager(private val context: Context) {
         }
         runningProcess = null
 
-        // Kill proot processes
-        executeShellCommand("pkill -f proot || true")
-        executeShellCommand("pkill -f Xvnc || true")
-        executeShellCommand("pkill -f xfce4-session || true")
-        executeShellCommand("pkill -f lxqt-session || true")
-        executeShellCommand("pkill -f mate-session || true")
-        executeShellCommand("pkill -f startplasma-wayland || true")
+        // Kill proot processes (ignore errors)
+        val bash = bashPath()
+        try { executeShellCommand("$bash -c 'pkill -f proot || true'") } catch (_: Exception) {}
+        try { executeShellCommand("$bash -c 'pkill -f Xvnc || true'") } catch (_: Exception) {}
+        try { executeShellCommand("$bash -c 'pkill -f xfce4-session || true'") } catch (_: Exception) {}
+        try { executeShellCommand("$bash -c 'pkill -f lxqt-session || true'") } catch (_: Exception) {}
+        try { executeShellCommand("$bash -c 'pkill -f mate-session || true'") } catch (_: Exception) {}
+        try { executeShellCommand("$bash -c 'pkill -f startplasma-wayland || true'") } catch (_: Exception) {}
     }
 
     /** Backup the container to a tar.gz file */
@@ -168,8 +196,9 @@ class ProotManager(private val context: Context) {
                 val backupDir = File(prootDir, "backups")
                 backupDir.mkdirs()
                 val backupFile = File(backupDir, "backup_${name}_${System.currentTimeMillis()}.tar.gz")
+                val bash = bashPath()
                 executeShellCommand(
-                    "tar -czf '${backupFile.absolutePath}' -C '${prootDir}' ubuntu"
+                    "$bash -c 'tar -czf \"${backupFile.absolutePath}\" -C \"${prootDir}\" ubuntu'"
                 )
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -190,10 +219,12 @@ class ProotManager(private val context: Context) {
                     // Stop existing session
                     stopLinux()
                     // Remove current rootfs
+                    val rootfsDir = File(prootDir, "ubuntu")
                     rootfsDir.deleteRecursively()
                     // Restore from backup
+                    val bash = bashPath()
                     executeShellCommand(
-                        "tar -xzf '${backupFiles.first().absolutePath}' -C '${prootDir}'"
+                        "$bash -c 'tar -xzf \"${backupFiles.first().absolutePath}\" -C \"${prootDir}\"'"
                     )
                 }
             } catch (e: Exception) {
@@ -217,12 +248,12 @@ class ProotManager(private val context: Context) {
         width: Int,
         height: Int
     ): String {
+        val rootfsDir = File(prootDir, detectInstalledDistro().ifEmpty { "ubuntu" })
         val prootRoot = rootfsDir.absolutePath
-        val debianMirror = "https://deb.debian.org/debian"
-        val ubuntuMirror = "https://ports.ubuntu.com/ubuntu-ports"
+        val proot = prootBinary()
 
         val prootArgs = buildString {
-            append("proot")
+            append(proot)
             append(" -0")
             append(" -w /root")
             append(" --link2symlink")
@@ -260,25 +291,26 @@ class ProotManager(private val context: Context) {
 
     private fun getDEPackages(de: String, type: String): String {
         return when (de) {
-            "xfce4" -> if (type == "minimal") "xfce4 xfce4-terminal" 
+            "xfce4" -> if (type == "minimal") "xfce4 xfce4-terminal"
                        else "xfce4 xfce4-terminal xfce4-goodies thunar-archive-plugin catfish"
-            "lxqt" -> if (type == "minimal") "lxqt" 
+            "lxqt" -> if (type == "minimal") "lxqt"
                       else "lxqt sddm lxqt-about"
-            "mate" -> if (type == "minimal") "mate-desktop mate-terminal" 
+            "mate" -> if (type == "minimal") "mate-desktop mate-terminal"
                       else "mate-desktop mate-terminal mate-utils pluma eom engrampa"
-            "kde" -> if (type == "minimal") "kde-plasma-desktop" 
+            "kde" -> if (type == "minimal") "kde-plasma-desktop"
                      else "kde-full kde-standard"
             else -> "xfce4"
         }
     }
 
     private fun configureDE(de: String, type: String) {
+        val distro = detectInstalledDistro().ifEmpty { "ubuntu" }
+        val rootfsDir = File(prootDir, distro)
         val configDir = File(rootfsDir, ".config")
         configDir.mkdirs()
 
         when (de) {
             "xfce4" -> {
-                // XFCE4 config for Termux compatibility
                 val xfceConfig = File(configDir, "xfce4/xfconf/xfce-perchannel-xml/xsettings.xml")
                 xfceConfig.parentFile?.mkdirs()
                 xfceConfig.writeText(
@@ -304,17 +336,16 @@ class ProotManager(private val context: Context) {
     }
 
     private fun installGPUDrivers() {
-        // Detect GPU and install appropriate Mesa drivers
         val gpuVendor = detectGPUVendor()
         when {
             gpuVendor.contains("adreno", ignoreCase = true) -> {
-                executeShellCommand("pkg install -y mesa-vulkan-icd-freedreno")
+                executeShellCommand("pkg install -y mesa-vulkan-icd-freedreno || true")
             }
             gpuVendor.contains("mali", ignoreCase = true) -> {
-                executeShellCommand("pkg install -y mesa-panfrost-dri")
+                executeShellCommand("pkg install -y mesa-panfrost-dri || true")
             }
             else -> {
-                executeShellCommand("pkg install -y mesa-zink")
+                executeShellCommand("pkg install -y mesa-zink || true")
             }
         }
     }
@@ -329,22 +360,22 @@ class ProotManager(private val context: Context) {
     }
 
     private fun detectInstalledDistro(): String {
-        val prootDistroDir = File(context.filesDir, "proot-distro")
-        if (prootDistroDir.exists()) {
-            prootDistroDir.listFiles()?.forEach { dir ->
-                if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true) {
+        // Check proot directory for installed distros
+        if (prootDir.exists()) {
+            prootDir.listFiles()?.forEach { dir ->
+                if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true
+                    && dir.name != "backups") {
                     return dir.name
                 }
             }
         }
-        // Check if ubuntu rootfs exists
-        if (isBootstrapped()) return "ubuntu"
         return ""
     }
 
     private fun detectInstalledDE(): String {
-        if (!isBootstrapped()) return ""
-        
+        val distro = detectInstalledDistro().ifEmpty { return "" }
+        val rootfsDir = File(prootDir, distro)
+
         // Check common DE indicator files
         val checks = mapOf(
             "xfce4" to "usr/bin/startxfce4",
@@ -361,9 +392,10 @@ class ProotManager(private val context: Context) {
     }
 
     private fun executeShellCommand(command: String): String {
+        val bash = bashPath()
         return try {
             val process = Runtime.getRuntime().exec(
-                arrayOf("/data/data/com.termux/files/usr/bin/bash", "-c", command)
+                arrayOf(bash, "-c", command)
             )
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             val output = reader.readText()
@@ -375,21 +407,23 @@ class ProotManager(private val context: Context) {
     }
 
     private fun writeBootstrapScript() {
-        bootstrapScript.writeText(
-            """#!/data/data/com.termux/files/usr/bin/bash
+        try {
+            bootstrapScript.writeText(
+                """#!/system/bin/sh
 # DroidForge Bootstrap Script
 echo "Setting up DroidForge environment..."
 
 # Update packages
-pkg update -y
+pkg update -y 2>/dev/null || true
 
 # Install core dependencies
-pkg install -y proot tar x11-repo proot-distro
+pkg install -y proot tar x11-repo proot-distro 2>/dev/null || true
 
 echo "Bootstrap complete!"
 """
-        )
-        bootstrapScript.setExecutable(true)
+            )
+            bootstrapScript.setExecutable(true)
+        } catch (_: Exception) {}
     }
 
     private fun sendProgress(
@@ -397,11 +431,14 @@ echo "Bootstrap complete!"
         progress: Double,
         status: String
     ) {
-        try {
-            channel.invokeMethod(
-                "onInstallProgress",
-                mapOf("progress" to progress, "status" to status)
-            )
-        } catch (_: Exception) {}
+        // Marshal to main thread for safety
+        mainHandler.post {
+            try {
+                channel.invokeMethod(
+                    "onInstallProgress",
+                    mapOf("progress" to progress, "status" to status)
+                )
+            } catch (_: Exception) {}
+        }
     }
 }

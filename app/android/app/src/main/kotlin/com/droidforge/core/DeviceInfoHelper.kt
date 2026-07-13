@@ -14,18 +14,23 @@ import java.io.RandomAccessFile
 object DeviceInfoHelper {
 
     fun getDeviceInfo(context: Context): Map<String, Any> {
+        val totalMem = getTotalMemory(context)
+        val availStorage = getAvailableStorage(context)
         return mapOf(
             "model" to Build.MODEL,
             "manufacturer" to Build.MANUFACTURER,
+            "brand" to Build.BRAND,
             "device" to Build.DEVICE,
             "androidVersion" to Build.VERSION.RELEASE,
             "sdkVersion" to Build.VERSION.SDK_INT,
             "abi" to (Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown") as String,
             "gpuVendor" to detectGPUVendor(),
-            "totalMemory" to getTotalMemory(context),
+            "totalMemory" to totalMem,
+            "totalRamMB" to (totalMem / (1024 * 1024)).toInt(),
             "availableMemory" to getAvailableMemory(context),
             "totalStorage" to getTotalStorage(),
-            "availableStorage" to getAvailableStorage(context),
+            "availableStorage" to availStorage,
+            "availableStorageMB" to (availStorage / (1024 * 1024)).toInt(),
             "processorCount" to Runtime.getRuntime().availableProcessors()
         )
     }
@@ -98,9 +103,11 @@ object DeviceInfoHelper {
             }
 
             // Fallback: check OpenGL renderer
+            val bashPath = if (File("/data/data/com.termux/files/usr/bin/bash").exists())
+                "/data/data/com.termux/files/usr/bin/bash" else "/system/bin/sh"
             val glRenderer = try {
                 val process = Runtime.getRuntime().exec(
-                    arrayOf("/data/data/com.termux/files/usr/bin/bash", "-c", "getprop ro.hardware.chipset")
+                    arrayOf(bashPath, "-c", "getprop ro.hardware.chipset")
                 )
                 val reader = java.io.BufferedReader(
                     java.io.InputStreamReader(process.inputStream)

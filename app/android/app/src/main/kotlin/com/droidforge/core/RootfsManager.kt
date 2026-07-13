@@ -1,6 +1,8 @@
 package com.droidforge.core
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import java.io.BufferedReader
@@ -25,12 +27,19 @@ class RootfsManager(private val context: Context) {
         "alpine" to "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-rootfs-3.20.1-aarch64.tar.gz"
     )
 
-    private val rootfsDir: File = File(context.filesDir, "proot/ubuntu")
+    private val prootDir: File = File(context.filesDir, "proot")
     private val downloadDir: File = File(context.filesDir, "downloads")
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** Resolve the bash path — try Termux first, fall back to system sh */
+    private fun bashPath(): String {
+        val termuxBash = File("/data/data/com.termux/files/usr/bin/bash")
+        return if (termuxBash.exists()) termuxBash.absolutePath else "/system/bin/sh"
+    }
 
     /**
      * Download a rootfs image for the given distribution.
-     * Sends progress via the MethodChannel.
+     * Sends progress via the MethodChannel (onDownloadProgress).
      */
     fun downloadRootfs(distro: String, messenger: BinaryMessenger) {
         val channel = MethodChannel(messenger, "com.droidforge/core")
@@ -39,7 +48,7 @@ class RootfsManager(private val context: Context) {
             try {
                 val url = distroUrls[distro]
                 if (url == null) {
-                    sendProgress(channel, -1.0, "Unsupported distro: $distro")
+                    sendProgress(channel, "onDownloadProgress", -1.0, "Unsupported distro: $distro")
                     return@Thread
                 }
 
@@ -49,11 +58,11 @@ class RootfsManager(private val context: Context) {
 
                 // Skip download if already cached
                 if (outputFile.exists() && outputFile.length() > 1000) {
-                    sendProgress(channel, 1.0, "Using cached rootfs...")
+                    sendProgress(channel, "onDownloadProgress", 1.0, "Using cached rootfs...")
                     return@Thread
                 }
 
-                sendProgress(channel, 0.0, "Downloading $distro rootfs...")
+                sendProgress(channel, "onDownloadProgress", 0.0, "Downloading $distro rootfs...")
 
                 val connection = URL(url).openConnection()
                 connection.connectTimeout = 30_000
@@ -76,12 +85,12 @@ class RootfsManager(private val context: Context) {
                         val progress = totalRead.toDouble() / totalSize.toDouble()
                         val percent = (progress * 100).toInt()
                         sendProgress(
-                            channel, progress,
+                            channel, "onDownloadProgress", progress,
                             "Downloading: $percent% ($totalRead / $totalSize bytes)"
                         )
                     } else {
                         sendProgress(
-                            channel, -0.0,
+                            channel, "onDownloadProgress", -0.0,
                             "Downloading: ${(totalRead / 1024 / 1024).toInt()} MB..."
                         )
                     }
@@ -91,23 +100,25 @@ class RootfsManager(private val context: Context) {
                 outputStream.close()
                 inputStream.close()
 
-                sendProgress(channel, 1.0, "Download complete!")
+                sendProgress(channel, "onDownloadProgress", 1.0, "Download complete!")
             } catch (e: Exception) {
-                sendProgress(channel, -1.0, "Download failed: ${e.message}")
+                sendProgress(channel, "onDownloadProgress", -1.0, "Download failed: ${e.message}")
             }
         }.start()
     }
 
     /**
      * Extract the downloaded rootfs into the proot directory.
-     * Sends progress via the MethodChannel.
+     * Sends progress via the MethodChannel (onExtractProgress).
      */
-    fun extractRootfs(messenger: BinaryMessenger) {
+    fun extractRootfs(distro: String, messenger: BinaryMessenger) {
         val channel = MethodChannel(messenger, "com.droidforge/core")
+        // Use distro-specific directory
+        val rootfsDir = File(prootDir, distro)
 
         Thread {
             try {
-                sendProgress(channel, 0.0, "Preparing extraction...")
+                sendProgress(channel, "onExtractProgress", 0.0, "Preparing extraction...")
 
                 rootfsDir.mkdirs()
                 val downloadFiles = downloadDir.listFiles()
@@ -115,15 +126,15 @@ class RootfsManager(private val context: Context) {
                     ?.sortedByDescending { it.lastModified() }
 
                 if (downloadFiles.isNullOrEmpty()) {
-                    sendProgress(channel, -1.0, "No rootfs archive found. Download first.")
+                    sendProgress(channel, "onExtractProgress", -1.0, "No rootfs archive found. Download first.")
                     return@Thread
                 }
 
                 val archiveFile = downloadFiles.first()
                 val fileSize = archiveFile.length()
-                sendProgress(channel, 0.1, "Extracting ${archiveFile.name}...")
+                sendProgress(channel, "onExtractProgress", 0.1, "Extracting ${archiveFile.name}...")
 
-                // Extract using tar/pv based on file type
+                // Extract using tar based on file type
                 val command = when {
                     archiveFile.name.endsWith(".tar.xz") -> {
                         "tar -xJf '${archiveFile.absolutePath}' -C '${rootfsDir}' --strip-components=0"
@@ -136,9 +147,10 @@ class RootfsManager(private val context: Context) {
                     }
                 }
 
-                sendProgress(channel, 0.3, "Extracting rootfs...")
+                sendProgress(channel, "onExtractProgress", 0.3, "Extracting rootfs...")
+                val bash = bashPath()
                 val process = Runtime.getRuntime().exec(
-                    arrayOf("/data/data/com.termux/files/usr/bin/bash", "-c", command)
+                    arrayOf(bash, "-c", command)
                 )
 
                 // Read output for progress tracking
@@ -159,43 +171,60 @@ class RootfsManager(private val context: Context) {
                             val progress = 0.3 + (pct / 100.0 * 0.6)
                             if (progress > lastProgress) {
                                 lastProgress = progress
-                                sendProgress(channel, progress, "Extracting: $pct%")
+                                sendProgress(channel, "onExtractProgress", progress, "Extracting: $pct%")
                             }
                         }
                     }
                 }
 
                 process.waitFor()
-                sendProgress(channel, 0.9, "Setting up environment...")
+                sendProgress(channel, "onExtractProgress", 0.9, "Setting up environment...")
 
                 // Post-extraction setup
-                postExtractSetup()
+                postExtractSetup(rootfsDir, distro)
 
-                sendProgress(channel, 1.0, "Extraction complete!")
+                sendProgress(channel, "onExtractProgress", 1.0, "Extraction complete!")
             } catch (e: Exception) {
-                sendProgress(channel, -1.0, "Extraction failed: ${e.message}")
+                sendProgress(channel, "onExtractProgress", -1.0, "Extraction failed: ${e.message}")
             }
         }.start()
     }
 
     /** Post-extraction: configure package manager, locale, etc. */
-    private fun postExtractSetup() {
+    private fun postExtractSetup(rootfsDir: File, distro: String) {
         try {
             // Create necessary directories
-            val dirs = listOf("etc/apt", "var/cache/apt", "var/lib/apt", "tmp")
+            val dirs = listOf("etc/apt", "var/cache/apt", "var/lib/apt", "tmp", "root")
             dirs.forEach { dir ->
                 File(rootfsDir, dir).mkdirs()
             }
 
-            // Write basic apt configuration
+            // Write distro-specific apt configuration
             val aptConf = File(rootfsDir, "etc/apt/sources.list")
             aptConf.parentFile?.mkdirs()
             aptConf.writeText(
-                """
+                when (distro) {
+                    "ubuntu" -> """
 deb http://ports.ubuntu.com/ubuntu-ports/ noble main restricted universe multiverse
 deb http://ports.ubuntu.com/ubuntu-ports/ noble-updates main restricted universe multiverse
 deb http://ports.ubuntu.com/ubuntu-ports/ noble-security main restricted universe multiverse
 """
+                    "debian" -> """
+deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
+deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
+"""
+                    "kali-nethunter" -> """
+deb http://http.kali.org/kali kali-rolling main contrib non-free non-free-firmware
+"""
+                    "alpine" -> """
+https://dl-cdn.alpinelinux.org/alpine/v3.20/main
+https://dl-cdn.alpinelinux.org/alpine/v3.20/community
+"""
+                    else -> """
+deb http://ports.ubuntu.com/ubuntu-ports/ noble main restricted universe multiverse
+"""
+                }
             )
 
             // Set locale
@@ -210,22 +239,25 @@ deb http://ports.ubuntu.com/ubuntu-ports/ noble-security main restricted univers
                 "nameserver 8.8.8.8\nnameserver 8.8.4.4\nnameserver 1.1.1.1\n"
             )
 
-            // Create home directory
-            File(rootfsDir, "root").mkdirs()
-
         } catch (_: Exception) {}
     }
 
     private fun sendProgress(
         channel: MethodChannel,
+        methodName: String,
         progress: Double,
         status: String
     ) {
         try {
-            channel.invokeMethod(
-                "onExtractProgress",
-                mapOf("progress" to progress, "status" to status)
-            )
+            // Marshal to main thread for safety
+            mainHandler.post {
+                try {
+                    channel.invokeMethod(
+                        methodName,
+                        mapOf("progress" to progress, "status" to status)
+                    )
+                } catch (_: Exception) {}
+            }
         } catch (_: Exception) {}
     }
 }
